@@ -198,6 +198,9 @@ class EtixCheckEngine:
         if not workers:
             raise RuntimeError("Failed to connect to any AdsPower browser workers via CDP!")
 
+        # Reset session blocked profiles for this run cycle
+        self.profile_manager.clear_session_blocked_profiles()
+
         # Setup RunContext / Checkpoint
         checkpoint_path = RunContext.find_last_active_checkpoint(self.config.runs_dir)
         if resume and checkpoint_path:
@@ -232,7 +235,7 @@ class EtixCheckEngine:
 
             for show in pending_shows:
                 ctx.mark_inflight(show.show_id)
-                res = await self._check_single_show(show, workers)
+                res = await self._check_single_show(show, self.cdp_pool.workers)
                 results.append(res)
                 ctx.commit_done(res)
 
@@ -630,12 +633,15 @@ class EtixCheckEngine:
         worker: BrowserWorker,
         show: Show,
         initial_delay_s: float = 0.0,
-        max_retries: int = 3,
+        max_profile_swaps: int = 3,
     ) -> Optional[BrowserWorker]:
         """
         Guarantees that a worker successfully opens the target show URL,
         passes bot challenges, dismisses popups, and confirms the page is ready for carting.
-        Includes multi-attempt retry loop and automatic hot-swap fallback.
+        If blocked by DataDome, attempts exactly 1 reload with fresh cookies.
+        If still blocked, closes the profile, records it in data/blocked_profiles.txt,
+        and hot-swaps up to max_profile_swaps (3) times with reserve profiles.
+        If all swaps fail, closes the failing browser cleanly and returns None.
         """
         if initial_delay_s > 0:
             await asyncio.sleep(initial_delay_s)
@@ -643,8 +649,9 @@ class EtixCheckEngine:
         current_worker = worker
         target_path = show.url.split("?")[0].rstrip("/")
         perf_id = extract_performance_id(show.url)
+        swaps_done = 0
 
-        for attempt in range(1, max_retries + 1):
+        while swaps_done <= max_profile_swaps:
             try:
                 # 1. Check if page is valid / not closed
                 try:
@@ -665,7 +672,6 @@ class EtixCheckEngine:
                 target_path_lower = target_path.lower()
 
                 on_target = False
-                # If currently on a cart page, clear cookies and force navigation
                 if any(k in curr_url for k in ["viewshoppingcart", "shoppingcart", "/cart", "checkout"]):
                     LOGGER.info(
                         f"[Worker #{current_worker.worker_index}] Currently in shopping cart, clearing cookies to start clean for {show.name}."
@@ -676,13 +682,11 @@ class EtixCheckEngine:
                         pass
                     on_target = False
                 elif perf_id:
-                    # Strict match: performance ID must be present in current URL
                     if f"/p/{perf_id}" in curr_url or f"/{perf_id}" in curr_url or perf_id in curr_url:
                         on_target = True
                 elif target_path_lower:
                     if target_path_lower in curr_url:
                         on_target = True
-
 
                 needs_nav = (
                     not curr_url
@@ -695,7 +699,7 @@ class EtixCheckEngine:
 
                 if needs_nav:
                     LOGGER.info(
-                        f"[Worker #{current_worker.worker_index}] (Attempt {attempt}/{max_retries}) Navigating to {show.url}..."
+                        f"[Worker #{current_worker.worker_index}] Navigating profile '{current_worker.profile.name}' to {show.url}..."
                     )
                     try:
                         await current_worker.page.goto(
@@ -708,23 +712,35 @@ class EtixCheckEngine:
                         await close_blocking_popups(current_worker.page)
                     except Exception as nav_exc:
                         LOGGER.warning(
-                            f"[Worker #{current_worker.worker_index}] Navigation failed on attempt {attempt}: {nav_exc}"
+                            f"[Worker #{current_worker.worker_index}] Navigation error on {current_worker.profile.name}: {nav_exc}"
                         )
 
-                # 3. Check for Bad Proxy page
+                # 3. Check for Bad Proxy page (Chrome network error)
                 if await self.detector.is_bad_proxy_page(current_worker.page):
                     LOGGER.warning(
-                        f"[Worker #{current_worker.worker_index}] Chrome network error / bad proxy on attempt {attempt}."
+                        f"[Worker #{current_worker.worker_index}] Chrome network error / bad proxy on '{current_worker.profile.name}'."
                     )
-                    if self.cdp_pool:
+                    if current_worker.profile.proxy_key:
+                        self.profile_manager.record_bad_proxy(current_worker.profile.proxy_key, "Network unreachable")
+                    self.profile_manager.record_blocked_profile(current_worker.profile, "Network / proxy unreachable")
+
+                    if swaps_done < max_profile_swaps and self.cdp_pool:
+                        LOGGER.info(
+                            f"[Worker #{current_worker.worker_index}] Hot-swapping due to bad proxy (Swap {swaps_done + 1}/{max_profile_swaps})..."
+                        )
                         new_w = await self.cdp_pool.replace_worker_with_reserve(
                             current_worker, reason="Bad proxy connection error"
                         )
                         if new_w:
                             current_worker = new_w
+                            swaps_done += 1
                             continue
 
-                # 4. Check for DataDome slider & block
+                    if self.cdp_pool:
+                        await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Bad proxy and swaps exhausted")
+                    return None
+
+                # 4. Check for DataDome slider captcha first
                 if await self.detector.is_slider_captcha(current_worker.page):
                     LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider detected. Solving...")
                     solved = await solve_datadome_slider(current_worker.page)
@@ -736,7 +752,6 @@ class EtixCheckEngine:
                         LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider solved! Waiting for session sync...")
                         await human_sleep((1000, 1800))
                         curr_u = (current_worker.page.url or "").lower()
-                        # If page hasn't auto-redirected back or is still on challenge frame
                         if "captcha" in curr_u or "datadome" in curr_u or (perf_id and perf_id not in curr_u):
                             LOGGER.info(f"[Worker #{current_worker.worker_index}] Navigating back to event URL {show.url} after solving captcha...")
                             try:
@@ -751,12 +766,14 @@ class EtixCheckEngine:
                             except Exception as re_nav_err:
                                 LOGGER.warning(f"[Worker #{current_worker.worker_index}] Post-captcha navigation warning: {re_nav_err}")
 
+                # 5. Check if blocked (DataDome "Access Temporarily Blocked" or unsolved slider)
                 if (
                     await self.detector.is_blocked_page(current_worker.page)
                     or await self.detector.is_slider_captcha(current_worker.page)
                 ):
                     LOGGER.warning(
-                        f"[Worker #{current_worker.worker_index}] DataDome active. Resetting cookies and retrying..."
+                        f"[Worker #{current_worker.worker_index}] DataDome block/captcha active on '{current_worker.profile.name}'. "
+                        f"Executing exactly 1 reload attempt with cookie reset..."
                     )
                     try:
                         await current_worker.context.clear_cookies()
@@ -766,27 +783,70 @@ class EtixCheckEngine:
                             wait_until="domcontentloaded",
                             timeout=self.config.nav_timeout,
                         )
+                        await human_sleep((400, 800))
                         await accept_cookies_if_present(current_worker.page)
                         await close_blocking_popups(current_worker.page)
-                    except Exception:
-                        pass
+                    except Exception as reload_err:
+                        LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
 
+                    # If slider appears after reload, give it 1 solve attempt
+                    if await self.detector.is_slider_captcha(current_worker.page):
+                        await solve_datadome_slider(current_worker.page)
+
+                    # Check if STILL blocked after 1 reload
                     if (
                         await self.detector.is_blocked_page(current_worker.page)
                         or await self.detector.is_slider_captcha(current_worker.page)
                     ):
-                        LOGGER.info(
-                            f"[Worker #{current_worker.worker_index}] DataDome still blocked. Initiating Hot-Swap..."
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] Profile '{current_worker.profile.name}' (ID: {current_worker.profile.user_id}) "
+                            f"STILL BLOCKED after 1 reload."
                         )
-                        if self.cdp_pool:
+                        # Record blocked profile & bad proxy
+                        self.profile_manager.record_blocked_profile(
+                            current_worker.profile,
+                            reason="Access Temporarily Blocked / DataDome"
+                        )
+                        if current_worker.profile.proxy_key:
+                            self.profile_manager.record_bad_proxy(
+                                current_worker.profile.proxy_key,
+                                reason="DataDome Blocked"
+                            )
+
+                        # Close failing browser and hot-swap if replacements remaining
+                        if swaps_done < max_profile_swaps and self.cdp_pool:
+                            LOGGER.info(
+                                f"[Worker #{current_worker.worker_index}] Closing blocked profile '{current_worker.profile.name}' "
+                                f"and opening reserve from group (Replacement {swaps_done + 1}/{max_profile_swaps})..."
+                            )
                             new_w = await self.cdp_pool.replace_worker_with_reserve(
-                                current_worker, reason="DataDome block unrecovered"
+                                current_worker,
+                                reason="DataDome block after 1 reload"
                             )
                             if new_w:
                                 current_worker = new_w
+                                swaps_done += 1
                                 continue
+                            else:
+                                LOGGER.error(
+                                    f"[Worker #{current_worker.worker_index}] No reserve profiles available in group for hot-swap."
+                                )
+                                await self.cdp_pool.stop_and_remove_worker(current_worker, reason="No reserve profiles")
+                                return None
+                        else:
+                            LOGGER.error(
+                                f"[Worker #{current_worker.worker_index}] Profile replacement limit ({max_profile_swaps}) "
+                                f"exhausted for this slot. Closing failing browser."
+                            )
+                            if self.cdp_pool:
+                                await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Max profile replacements reached")
+                            return None
+                    else:
+                        LOGGER.info(
+                            f"[Worker #{current_worker.worker_index}] Block on '{current_worker.profile.name}' successfully cleared after 1 reload!"
+                        )
 
-                # 5. Check if page reached Sold Out or Sales Ended
+                # 6. Check if page reached Sold Out or Sales Ended
                 if (
                     await self.detector.is_soldout_page(current_worker.page)
                     or await self.detector.is_event_ended_page(current_worker.page)
@@ -796,7 +856,7 @@ class EtixCheckEngine:
                     )
                     return current_worker
 
-                # 6. Verify Ticket Controls & DOM Readiness (Dismiss modals first)
+                # 7. Verify Ticket Controls & DOM Readiness
                 await close_blocking_popups(current_worker.page)
 
                 try:
@@ -810,7 +870,6 @@ class EtixCheckEngine:
                 controls = await self.cart_handler.get_all_quantity_controls(current_worker.page)
                 add_btn = await self.cart_handler.find_add_button(current_worker.page)
 
-                # Also check for presence of ticket pricing table / event info / selection forms
                 has_ticket_content = False
                 try:
                     has_ticket_content = await current_worker.page.locator(
@@ -826,11 +885,11 @@ class EtixCheckEngine:
                     )
                     return current_worker
 
-                # If on venue domain or etix but controls not yet visible, reload softly
+                # If on venue domain or etix but controls not yet visible, reload once
                 curr_url = current_worker.page.url or ""
                 if any(d in curr_url for d in ["etix.com", "cascadetickets.com", "catscradle"]):
                     LOGGER.warning(
-                        f"[Worker #{current_worker.worker_index}] URL is open but controls not rendered (attempt {attempt}/{max_retries}). Reloading..."
+                        f"[Worker #{current_worker.worker_index}] URL is open but controls not rendered. Reloading once..."
                     )
                     try:
                         await current_worker.page.reload(
@@ -843,14 +902,56 @@ class EtixCheckEngine:
                     except Exception:
                         pass
 
+                    controls = await self.cart_handler.get_all_quantity_controls(current_worker.page)
+                    add_btn = await self.cart_handler.find_add_button(current_worker.page)
+                    if controls or add_btn or has_ticket_content:
+                        LOGGER.info(f"[Worker #{current_worker.worker_index}] Verified READY after soft reload on {show.url}")
+                        return current_worker
+
+                # If still not ready and swaps remaining, try hot-swap
+                if swaps_done < max_profile_swaps and self.cdp_pool:
+                    LOGGER.warning(
+                        f"[Worker #{current_worker.worker_index}] Page controls missing on '{current_worker.profile.name}'. "
+                        f"Swapping with reserve ({swaps_done + 1}/{max_profile_swaps})..."
+                    )
+                    new_w = await self.cdp_pool.replace_worker_with_reserve(
+                        current_worker, reason="Controls missing / page unresponsive"
+                    )
+                    if new_w:
+                        current_worker = new_w
+                        swaps_done += 1
+                        continue
+
+                # Swaps exhausted or no pool
+                LOGGER.error(
+                    f"[Worker #{current_worker.worker_index}] Failed to confirm readiness on {show.url}. Closing failing browser."
+                )
+                if self.cdp_pool:
+                    await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Readiness confirmation failed")
+                return None
+
             except Exception as exc:
                 LOGGER.warning(
-                    f"[Worker #{current_worker.worker_index}] Readiness check error (attempt {attempt}/{max_retries}): {exc}"
+                    f"[Worker #{current_worker.worker_index}] Readiness check exception on {current_worker.profile.name}: {exc}"
                 )
+                if swaps_done < max_profile_swaps and self.cdp_pool:
+                    new_w = await self.cdp_pool.replace_worker_with_reserve(
+                        current_worker, reason=f"Readiness error: {exc}"
+                    )
+                    if new_w:
+                        current_worker = new_w
+                        swaps_done += 1
+                        continue
+
+                if self.cdp_pool:
+                    await self.cdp_pool.stop_and_remove_worker(current_worker, reason=f"Readiness exception: {exc}")
+                return None
 
         LOGGER.error(
-            f"[Worker #{current_worker.worker_index}] Failed to confirm readiness on {show.url} after {max_retries} attempts."
+            f"[Worker #{current_worker.worker_index}] Exceeded max swaps ({max_profile_swaps}). Closing browser."
         )
+        if self.cdp_pool:
+            await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Max profile swaps exceeded")
         return None
 
     async def _ensure_worker_accessible(

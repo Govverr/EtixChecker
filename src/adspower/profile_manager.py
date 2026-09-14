@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -23,15 +24,18 @@ class AdsPowerProfileManager:
         backup_service: Optional[ProfileBackupService] = None,
         good_proxies_file: Path = Path("data/good_proxies.txt"),
         bad_proxies_file: Path = Path("data/bad_proxies.txt"),
+        blocked_profiles_file: Path = Path("data/blocked_profiles.txt"),
     ) -> None:
         self.client = client
         self.backup_service = backup_service or ProfileBackupService()
         self.good_proxies_file = good_proxies_file
         self.bad_proxies_file = bad_proxies_file
+        self.blocked_profiles_file = blocked_profiles_file
         self.profiles: List[AdsPowerProfile] = []
         self._good_proxies: Set[str] = self._load_proxy_list(good_proxies_file)
         self._bad_proxies: Set[str] = self._load_proxy_list(bad_proxies_file)
         self._session_bad_proxies: Set[str] = set()  # Bad proxies strictly for current run cycle
+        self._session_blocked_profiles: List[Dict[str, str]] = []  # Blocked profiles for current run cycle
 
     def _load_proxy_list(self, file_path: Path) -> Set[str]:
         if not file_path.exists():
@@ -74,6 +78,44 @@ class AdsPowerProfileManager:
         except Exception:
             pass
         LOGGER.warning(f"Marked bad proxy for current cycle: {proxy_str} ({reason})")
+
+    def record_blocked_profile(self, profile: AdsPowerProfile, reason: str = "Access Blocked / Captcha") -> None:
+        """
+        Record a profile that hit a DataDome block or captcha.
+        Saves to in-memory session list and persists to data/blocked_profiles.txt.
+        """
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        proxy_info = profile.proxy_key if profile.proxy_key else f"{profile.proxy_host}:{profile.proxy_port}"
+
+        # In-memory session tracking (avoid duplicate user_id)
+        if not any(p["user_id"] == profile.user_id for p in self._session_blocked_profiles):
+            self._session_blocked_profiles.append({
+                "user_id": profile.user_id,
+                "name": profile.name,
+                "proxy": proxy_info,
+                "reason": reason,
+                "timestamp": now_str,
+            })
+
+        # Append to persistent blocked_profiles.txt
+        try:
+            self.blocked_profiles_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.blocked_profiles_file, "a", encoding="utf-8") as f:
+                f.write(f"[{now_str}] Profile: {profile.name} (ID: {profile.user_id}) | Proxy: {proxy_info} | Reason: {reason}\n")
+        except Exception as exc:
+            LOGGER.warning(f"Failed to write to {self.blocked_profiles_file}: {exc}")
+
+        LOGGER.warning(
+            f"🚫 Recorded BLOCKED profile: '{profile.name}' (ID: {profile.user_id}) with proxy {proxy_info}. Reason: {reason}"
+        )
+
+    def get_session_blocked_profiles(self) -> List[Dict[str, str]]:
+        """Return all profiles that were blocked during the current session."""
+        return list(self._session_blocked_profiles)
+
+    def clear_session_blocked_profiles(self) -> None:
+        """Reset session blocked profiles at the start of a check."""
+        self._session_blocked_profiles.clear()
 
     def is_proxy_bad_in_session(self, proxy_str: str) -> bool:
         """Check if proxy is marked bad in current run cycle."""

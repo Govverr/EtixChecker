@@ -396,6 +396,9 @@ class EtixGuiApp(ctk.CTk):
         self.btn_report = self._create_action_btn("📊  report.csv", lambda: self._open_file(Path("report.csv")))
         self.btn_report.pack(side="left", padx=6)
 
+        self.btn_blocked = self._create_action_btn("🚫  Заблокированные", lambda: self._open_file(Path("data/blocked_profiles.txt")))
+        self.btn_blocked.pack(side="left", padx=6)
+
         self.btn_logs = self._create_action_btn("📁  Логи", lambda: self._open_folder(CONFIG.logs_dir))
         self.btn_logs.pack(side="left", padx=6)
 
@@ -1258,7 +1261,31 @@ class EtixGuiApp(ctk.CTk):
                     total_tgt = sum(r.target for r in results)
                     self.stat_reserved.lbl_val.configure(text=f"{total_res} / {total_tgt}")
                     self._log("🎉 Проверка успешно завершена. Отчет сохранен в report.csv.")
-                    messagebox.showinfo("Готово", "Проверка завершена! Результаты сохранены в report.csv.")
+
+                    # Check for blocked profiles recorded in this session
+                    blocked = self.profile_manager.get_session_blocked_profiles()
+                    if blocked:
+                        self._log("⚠️ =========================================")
+                        self._log(f"⚠️ ВНИМАНИЕ: Во время проверки были заблокированы {len(blocked)} профилей:")
+                        details_lines = []
+                        for bp in blocked:
+                            info = f"• {bp['name']} (ID: {bp['user_id']}) | Прокси: {bp.get('proxy', 'N/A')}"
+                            self._log(f"   🚫 {info} — {bp.get('reason', 'Заблокирован')}")
+                            details_lines.append(info)
+                        self._log("📝 Полный список сохранен в 'data/blocked_profiles.txt'.")
+                        self._log("⚠️ =========================================")
+
+                        prompt_msg = (
+                            f"Проверка завершена!\n\n"
+                            f"⚠️ ОБНАРУЖЕНЫ БЛОКИРОВКИ НА {len(blocked)} ПРОФИЛЯХ:\n\n"
+                            + "\n".join(details_lines[:8])
+                            + (f"\n...и еще {len(blocked) - 8} шт." if len(blocked) > 8 else "")
+                            + "\n\n💡 Список сохранен в файле: data/blocked_profiles.txt\n"
+                            f"Рекомендуется сменить прокси или обновить цифровой отпечаток в AdsPower!"
+                        )
+                        messagebox.showwarning("Внимание: Заблокированные профили", prompt_msg)
+                    else:
+                        messagebox.showinfo("Готово", "Проверка завершена! Результаты сохранены в report.csv.")
 
                 elif kind == "check_failed":
                     self.is_running = False
@@ -1277,7 +1304,8 @@ class EtixGuiApp(ctk.CTk):
             messagebox.showwarning("Файл не найден", f"Файл {path} еще не создан.")
             return
         os.startfile(path)
-        self._load_shows_preview()
+        if path == CONFIG.shows_csv:
+            self._load_shows_preview()
 
     def _open_folder(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)

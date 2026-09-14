@@ -238,7 +238,131 @@ class TestPoolAndDelays(unittest.IsolatedAsyncioTestCase):
         is_sold_out = await detector.is_soldout_page(page)
         self.assertFalse(is_sold_out, "Active ticket controls must override any sold out text/alert!")
 
+    async def test_blocked_profile_tracking_and_persistence(self):
+        """Verify recording, deduplication, file persistence, and clearing of blocked profiles."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_blocked = Path(tmp_dir) / "blocked_test.txt"
+            mock_client = AsyncMock(spec=AdsPowerClient)
+            manager = AdsPowerProfileManager(
+                client=mock_client,
+                blocked_profiles_file=tmp_blocked,
+            )
+
+            p1 = AdsPowerProfile(user_id="u1", name="Profile #01", serial_number="101", group_id="g1", group_name="G1", proxy_host="1.1.1.1", proxy_port="8000")
+            p2 = AdsPowerProfile(user_id="u2", name="Profile #02", serial_number="102", group_id="g1", group_name="G1", proxy_host="2.2.2.2", proxy_port="8000")
+
+            manager.record_blocked_profile(p1, reason="DataDome Blocked")
+            manager.record_blocked_profile(p2, reason="Access Temporarily Blocked")
+            # Duplicate call for p1
+            manager.record_blocked_profile(p1, reason="DataDome Blocked")
+
+            session_blocked = manager.get_session_blocked_profiles()
+            self.assertEqual(len(session_blocked), 2, "Duplicate profile record must be deduplicated in session list.")
+            self.assertEqual(session_blocked[0]["user_id"], "u1")
+            self.assertEqual(session_blocked[0]["name"], "Profile #01")
+            self.assertEqual(session_blocked[1]["user_id"], "u2")
+
+            # Check file persistence
+            self.assertTrue(tmp_blocked.exists(), "Blocked profiles file must be created on disk.")
+            content = tmp_blocked.read_text(encoding="utf-8")
+            self.assertIn("Profile #01 (ID: u1)", content)
+            self.assertIn("Profile #02 (ID: u2)", content)
+
+            # Check session clearing
+            manager.clear_session_blocked_profiles()
+            self.assertEqual(len(manager.get_session_blocked_profiles()), 0, "Session list must be cleared.")
+            # File on disk remains intact
+            self.assertTrue(tmp_blocked.exists())
+
+    async def test_cdp_pool_stop_and_remove_worker(self):
+        """Verify stop_and_remove_worker cleanly closes browser, marks failed, and unregisters worker."""
+        from src.browser.cdp_pool import CDPBrowserPool, BrowserWorker
+        mock_client = AsyncMock(spec=AdsPowerClient)
+        mock_manager = MagicMock(spec=AdsPowerProfileManager)
+
+        pool = CDPBrowserPool(config=AppConfig(), client=mock_client, profile_manager=mock_manager)
+
+        p = AdsPowerProfile(user_id="u99", name="Profile #99", serial_number="199", group_id="g1", group_name="Test")
+        p.is_open = True
+        mock_browser = AsyncMock()
+        mock_page = AsyncMock()
+        mock_ctx = AsyncMock()
+
+        worker = BrowserWorker(
+            profile=p,
+            browser=mock_browser,
+            context=mock_ctx,
+            page=mock_page,
+            worker_index=1,
+        )
+        pool.workers.append(worker)
+
+        await pool.stop_and_remove_worker(worker, reason="Max profile swaps reached")
+
+        mock_browser.close.assert_awaited_once()
+        mock_client.stop_browser.assert_awaited_once_with("u99")
+        mock_manager.mark_profile_failed.assert_called_once_with(p)
+        self.assertFalse(p.is_open)
+        self.assertNotIn(worker, pool.workers, "Worker must be cleanly removed from active pool.")
+
+    async def test_ensure_worker_ready_for_show_block_and_swap_limit(self):
+        """Verify 1 reload attempt, recording to blocked profiles, and swap limit exhaustion."""
+        from src.etix.checker import EtixCheckEngine
+        from src.browser.cdp_pool import CDPBrowserPool, BrowserWorker
+
+        mock_client = AsyncMock(spec=AdsPowerClient)
+        mock_manager = MagicMock(spec=AdsPowerProfileManager)
+
+        cfg = AppConfig()
+        engine = EtixCheckEngine(config=cfg, client=mock_client, profile_manager=mock_manager)
+        mock_pool = AsyncMock(spec=CDPBrowserPool)
+        engine.cdp_pool = mock_pool
+
+        # Mock worker whose page is blocked
+        p = AdsPowerProfile(user_id="u_fail", name="Blocked Worker", serial_number="999", group_id="g1", group_name="G1")
+        mock_page = MagicMock()
+        mock_page.url = "https://www.etix.com/ticket/p/12345/test-event"
+        mock_page.is_closed.return_value = False
+        mock_page.bring_to_front = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.reload = AsyncMock()
+        mock_page.set_default_navigation_timeout = MagicMock()
+        mock_page.set_default_timeout = MagicMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.clear_cookies = AsyncMock()
+        mock_ctx.new_page = AsyncMock(return_value=mock_page)
+
+        worker = BrowserWorker(
+            profile=p,
+            browser=AsyncMock(),
+            context=mock_ctx,
+            page=mock_page,
+            worker_index=1,
+        )
+
+        # Detector always reports blocked
+        engine.detector.is_bad_proxy_page = AsyncMock(return_value=False)
+        engine.detector.is_slider_captcha = AsyncMock(return_value=False)
+        engine.detector.is_blocked_page = AsyncMock(return_value=True)
+
+        # Mock pool replace_worker_with_reserve returning None (exhausted)
+        mock_pool.replace_worker_with_reserve.return_value = None
+
+        show = Show(show_id="s1", name="Test Show", url="https://www.etix.com/ticket/p/12345/test-event", target_total=4)
+
+        result = await engine._ensure_worker_ready_for_show(worker, show, max_profile_swaps=1)
+
+        # Must return None when swaps exhausted
+        self.assertIsNone(result)
+        # Must record blocked profile
+        mock_manager.record_blocked_profile.assert_called()
+        # Must call stop_and_remove_worker to close the browser cleanly
+        mock_pool.stop_and_remove_worker.assert_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

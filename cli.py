@@ -149,6 +149,38 @@ async def main_cli() -> None:
         )
     )
 
+    # Display Blocked Profiles Report if any occurred
+    blocked = profile_manager.get_session_blocked_profiles()
+    if blocked:
+        blocked_table = Table(
+            title="[bold red]⚠️ Blocked Profiles Alert (Action Required)[/bold red]",
+            box=box.ROUNDED,
+            header_style="bold red",
+        )
+        blocked_table.add_column("Profile Name", style="bold yellow")
+        blocked_table.add_column("User ID", style="cyan")
+        blocked_table.add_column("Proxy", style="dim")
+        blocked_table.add_column("Reason", style="red")
+
+        for bp in blocked:
+            blocked_table.add_row(
+                bp.get("name", "Unknown"),
+                bp.get("user_id", "N/A"),
+                bp.get("proxy", "N/A"),
+                bp.get("reason", "Blocked"),
+            )
+
+        console.print(blocked_table)
+        console.print(
+            Panel(
+                f"[bold yellow]Recommendation:[/bold yellow] DataDome blocks were encountered on {len(blocked)} profile(s).\n"
+                f"Please rotate their proxies or regenerate digital fingerprints in AdsPower before the next run.\n"
+                f"Full audit history saved to [cyan]data/blocked_profiles.txt[/cyan].",
+                border_style="yellow",
+                box=box.ROUNDED,
+            )
+        )
+
 
 if __name__ == "__main__":
     asyncio.run(main_cli())

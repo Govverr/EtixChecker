@@ -169,22 +169,29 @@ class CDPBrowserPool:
             LOGGER.warning(
                 f"Initiating Hot-Swap for Worker #{failing_worker.worker_index} ({failing_worker.profile.user_id}). Reason: {reason}"
             )
-            # 1. Record failing proxy as session bad and mark profile failed
+            # 1. Record failing proxy as session bad, record blocked profile, and mark profile failed
             if failing_worker.profile.proxy_key:
                 self.profile_manager.record_bad_proxy(failing_worker.profile.proxy_key, reason)
+            self.profile_manager.record_blocked_profile(failing_worker.profile, reason)
             self.profile_manager.mark_profile_failed(failing_worker.profile)
 
             # 2. Close failing browser
             try:
                 await failing_worker.browser.close()
+            except Exception:
+                pass
+            try:
                 await self.client.stop_browser(failing_worker.profile.user_id)
             except Exception:
                 pass
+            failing_worker.profile.is_open = False
 
             # 3. Find next reserve profile strictly from target group
             reserve_prof = self.profile_manager.get_next_available_reserve()
             if not reserve_prof:
                 LOGGER.error("No reserve profiles available in target group for hot-swap!")
+                if failing_worker in self.workers:
+                    self.workers.remove(failing_worker)
                 return None
 
             # 4. Assign good proxy to reserve profile via AdsPower API
@@ -194,6 +201,8 @@ class CDPBrowserPool:
             new_worker = await self._connect_profile(reserve_prof, worker_index=failing_worker.worker_index)
             if not new_worker:
                 LOGGER.error(f"Failed to connect reserve profile {reserve_prof.user_id}")
+                if failing_worker in self.workers:
+                    self.workers.remove(failing_worker)
                 return None
 
             # 6. Update workers list
@@ -205,6 +214,28 @@ class CDPBrowserPool:
                 f"Hot-swap complete! Worker #{failing_worker.worker_index} is now profile '{reserve_prof.name}' ({reserve_prof.user_id})"
             )
             return new_worker
+
+    async def stop_and_remove_worker(self, worker: BrowserWorker, reason: str = "") -> None:
+        """
+        Safely close browser, stop AdsPower instance, mark profile failed,
+        and remove worker from active pool.
+        """
+        async with self._lock:
+            LOGGER.warning(
+                f"Stopping and removing worker #{worker.worker_index} ({worker.profile.name}, {worker.profile.user_id}). Reason: {reason}"
+            )
+            try:
+                await worker.browser.close()
+            except Exception:
+                pass
+            try:
+                await self.client.stop_browser(worker.profile.user_id)
+            except Exception:
+                pass
+            worker.profile.is_open = False
+            self.profile_manager.mark_profile_failed(worker.profile)
+            if worker in self.workers:
+                self.workers.remove(worker)
 
     async def close_all(self) -> None:
         """
