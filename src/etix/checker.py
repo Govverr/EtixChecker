@@ -310,10 +310,21 @@ class EtixCheckEngine:
                     details=f"Ошибка навигации: {exc}",
                 )
 
-        # Step 2: Check SOLD OUT
+        # Step 2: Check SOLD OUT / OFF SALE
         if await self.detector.is_soldout_page(primary_worker.page):
             screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="soldout")
-            LOGGER.info(f"Event '{show.name}' is SOLD OUT.")
+            body_txt = ""
+            try:
+                body_txt = (await primary_worker.page.inner_text("body", timeout=1000)).lower()
+            except Exception:
+                pass
+            is_off_sale = "off sale online" in body_txt
+            details_str = (
+                "Билеты сняты с онлайн-продажи (Off Sale Online)"
+                if is_off_sale
+                else "Билеты распроданы (SOLD OUT)"
+            )
+            LOGGER.info(f"Event '{show.name}' is {details_str}.")
             return CheckResult(
                 show_id=show.show_id,
                 name=show.name,
@@ -321,7 +332,7 @@ class EtixCheckEngine:
                 status=ShowStatus.SOLD_OUT,
                 target=show.target_total,
                 reserved=0,
-                details="Билеты распроданы (SOLD OUT)",
+                details=details_str,
                 screenshot_path=screen,
             )
 
@@ -364,7 +375,51 @@ class EtixCheckEngine:
             )
         primary_worker = accessible_primary
 
-        # Step 5: Determine per-order limit (strictly respect show.max_per_order from shows.csv)
+        # Step 5: Check ticket control availability and determine per-order limit
+        all_controls = await self.cart_handler.get_all_quantity_controls(primary_worker.page)
+        if not all_controls:
+            if await self.detector.is_soldout_page(primary_worker.page):
+                screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="soldout")
+                return CheckResult(
+                    show_id=show.show_id,
+                    name=show.name,
+                    url=show.url,
+                    status=ShowStatus.SOLD_OUT,
+                    target=show.target_total,
+                    reserved=0,
+                    details="Билеты распроданы (селекторы отсутствуют)",
+                    screenshot_path=screen,
+                )
+            if await self.detector.is_event_ended_page(primary_worker.page):
+                screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="ended")
+                return CheckResult(
+                    show_id=show.show_id,
+                    name=show.name,
+                    url=show.url,
+                    status=ShowStatus.ENDED,
+                    target=show.target_total,
+                    reserved=0,
+                    details="Продажи завершены (Sales Ended)",
+                    screenshot_path=screen,
+                )
+            screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="no_controls")
+            return CheckResult(
+                show_id=show.show_id,
+                name=show.name,
+                url=show.url,
+                status=ShowStatus.FAILED,
+                target=show.target_total,
+                reserved=0,
+                details="Контролы выбора билетов не найдены на странице",
+                screenshot_path=screen,
+            )
+
+        if show.ticket_index is not None and show.ticket_index > len(all_controls):
+            LOGGER.warning(
+                f"ticket_index {show.ticket_index} exceeds available categories ({len(all_controls)}). "
+                f"Will default to available controls."
+            )
+
         if show.max_per_order and show.max_per_order > 0:
             effective_max_per_order = show.max_per_order
         else:

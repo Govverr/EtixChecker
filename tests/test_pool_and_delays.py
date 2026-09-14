@@ -19,6 +19,7 @@ from src.config.settings import (
 from src.domain.enums import ProfileRole, ShowStatus
 from src.domain.models import AdsPowerProfile, CheckResult, Show
 from src.etix.checker import extract_performance_id
+from src.etix.detector import EtixDetector
 
 
 class TestPoolAndDelays(unittest.IsolatedAsyncioTestCase):
@@ -133,6 +134,111 @@ class TestPoolAndDelays(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reserve.role, ProfileRole.IN_USE)
         self.assertNotIn(reserve.user_id, busy_uids)
 
+    def _create_mock_page(self, body_text: str = "", visible_selectors: list = None, has_controls: bool = False):
+        page = AsyncMock()
+        visible_selectors = visible_selectors or []
+        page.inner_text = AsyncMock(return_value=body_text)
+
+        controls_locator = MagicMock()
+        if has_controls:
+            controls_locator.count = AsyncMock(return_value=1)
+            ctrl = AsyncMock()
+            ctrl.is_visible = AsyncMock(return_value=True)
+            ctrl.is_disabled = AsyncMock(return_value=False)
+            ctrl.get_attribute = AsyncMock(return_value="ticket_qty_1")
+            ctrl.evaluate = AsyncMock(return_value="select")
+            opt_loc = MagicMock()
+            opt_loc.all_inner_texts = AsyncMock(return_value=["0", "1", "2", "3", "4"])
+            ctrl.locator = MagicMock(return_value=opt_loc)
+            controls_locator.nth = MagicMock(return_value=ctrl)
+        else:
+            controls_locator.count = AsyncMock(return_value=0)
+
+        def mock_locator(sel):
+            if any(k in sel for k in [".smoketest-ticket-quantity", "[role='combobox']", ".MuiSelect-select", "select"]):
+                return controls_locator
+            loc = MagicMock()
+            first_loc = AsyncMock()
+            is_vis = any(vs in sel for vs in visible_selectors)
+            first_loc.is_visible = AsyncMock(return_value=is_vis)
+            loc.first = first_loc
+            return loc
+
+        page.locator = MagicMock(side_effect=mock_locator)
+        return page
+
+    async def test_sold_out_detection_artist_bio_not_sold_out(self):
+        """Artist biography mentioning 'sold out' must NOT trigger Sold Out status."""
+        config = AppConfig()
+        detector = EtixDetector(config)
+
+        bio_text = (
+            "Kevin Atwater - Blush Red Tour. "
+            "In 2025, Kevin released his debut album Achilles, which garnered more than 10 million streams "
+            "across all DSPs, sold out his debut headline North American tour, and premiered a short film..."
+        )
+        page = self._create_mock_page(body_text=bio_text, visible_selectors=[], has_controls=True)
+
+        is_sold_out = await detector.is_soldout_page(page)
+        self.assertFalse(is_sold_out, "Page with bio mentioning 'sold out' should NOT be marked sold out!")
+
+    async def test_sold_out_detection_real_sold_out(self):
+        """Page with official 'This performance is sold out' and no controls must be detected as Sold Out."""
+        config = AppConfig()
+        detector = EtixDetector(config)
+
+        page = self._create_mock_page(
+            body_text="This performance is sold out.",
+            visible_selectors=[".alert:has-text('This performance is sold out')"],
+            has_controls=False,
+        )
+
+        is_sold_out = await detector.is_soldout_page(page)
+        self.assertTrue(is_sold_out, "Real sold out page must be detected as Sold Out!")
+
+    async def test_sold_out_detection_off_sale_online(self):
+        """Page with 'Off Sale Online' banner and no controls must be detected as Sold Out/Off Sale."""
+        config = AppConfig()
+        detector = EtixDetector(config)
+
+        page = self._create_mock_page(
+            body_text="Off Sale Online. This performance is sold out.",
+            visible_selectors=[".alert:has-text('Off Sale Online')"],
+            has_controls=False,
+        )
+
+        is_sold_out = await detector.is_soldout_page(page)
+        self.assertTrue(is_sold_out, "Page with 'Off Sale Online' banner must be detected as Sold Out!")
+
+    async def test_sold_out_detection_waitlist_set_alert(self):
+        """Page with waitlist 'Set Alert' button and no controls must be detected as Sold Out."""
+        config = AppConfig()
+        detector = EtixDetector(config)
+
+        page = self._create_mock_page(
+            body_text="We'll send you an email if tickets become available.",
+            visible_selectors=["button:has-text('Set Alert')"],
+            has_controls=False,
+        )
+
+        is_sold_out = await detector.is_soldout_page(page)
+        self.assertTrue(is_sold_out, "Waitlist page with 'Set Alert' must be detected as Sold Out!")
+
+    async def test_sold_out_detection_controls_override_safeguard(self):
+        """If active ticket controls exist, page must NOT be marked sold out even if text/alert matches."""
+        config = AppConfig()
+        detector = EtixDetector(config)
+
+        page = self._create_mock_page(
+            body_text="This performance is sold out.",
+            visible_selectors=[".alert:has-text('This performance is sold out')"],
+            has_controls=True,
+        )
+
+        is_sold_out = await detector.is_soldout_page(page)
+        self.assertFalse(is_sold_out, "Active ticket controls must override any sold out text/alert!")
+
 
 if __name__ == "__main__":
     unittest.main()
+

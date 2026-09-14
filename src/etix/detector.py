@@ -63,8 +63,52 @@ class EtixDetector:
         except Exception:
             return False
 
+    async def has_active_ticket_controls(self, page: Page) -> bool:
+        """Check whether page has visible, active ticket quantity selectors."""
+        try:
+            controls = page.locator(
+                ".smoketest-ticket-quantity [role='combobox'], "
+                ".smoketest-ticket-quantity .MuiSelect-select, "
+                "[role='combobox'], "
+                ".MuiSelect-select, "
+                "select"
+            )
+            count = await controls.count()
+            for i in range(count):
+                ctrl = controls.nth(i)
+                try:
+                    if not await ctrl.is_visible(timeout=200):
+                        continue
+                    if await ctrl.is_disabled():
+                        continue
+
+                    # Filter out price/section selection dropdowns
+                    el_id = (await ctrl.get_attribute("id") or "").strip().lower()
+                    el_name = (await ctrl.get_attribute("name") or "").strip().lower()
+                    if "selection" in el_id or any(k in el_name for k in ["priceselection", "price_level", "pricecode"]):
+                        continue
+
+                    tag = await ctrl.evaluate("el => el.tagName.toLowerCase()")
+                    if tag == "select":
+                        opts = await ctrl.locator("option").all_inner_texts()
+                        has_positive_qty = any(o.strip().isdigit() and int(o.strip()) > 0 for o in opts)
+                        if has_positive_qty:
+                            return True
+                    else:
+                        # Material-UI combobox
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     async def is_soldout_page(self, page: Page) -> bool:
         """Check whether the page indicates the event is Sold Out."""
+        # Edge Case Safeguard: if active ticket controls are visible on the page, the show is available
+        if await self.has_active_ticket_controls(page):
+            return False
+
         for selector in self.config.sold_out_banner_selectors:
             try:
                 locator = page.locator(selector).first
@@ -85,6 +129,10 @@ class EtixDetector:
 
     async def is_event_ended_page(self, page: Page) -> bool:
         """Check whether sales for this event have ended."""
+        # Edge Case Safeguard: if active ticket controls are visible, sales have not ended
+        if await self.has_active_ticket_controls(page):
+            return False
+
         for selector in self.config.ended_selectors:
             try:
                 locator = page.locator(selector).first

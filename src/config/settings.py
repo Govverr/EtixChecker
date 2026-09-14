@@ -164,18 +164,34 @@ class AppConfig:
     # Anti-bot and Sold Out Detection Selectors
     sold_out_banner_selectors: List[str] = field(
         default_factory=lambda: [
+            # Top banner alerts
             "div[role='alert']:has-text('This performance is sold out')",
             ".alert:has-text('This performance is sold out')",
             ".alert-info:has-text('This performance is sold out')",
-            "div[role='alert']:has-text('SOLD OUT')",
-            ".alert:has-text('SOLD OUT')",
-            ".alert-info:has-text('SOLD OUT')",
+            "div[role='alert']:has-text('Off Sale Online')",
+            ".alert:has-text('Off Sale Online')",
+            ".alert-info:has-text('Off Sale Online')",
+            ".alert-secondary:has-text('Off Sale Online')",
+            # Section headers on sold-out pages
+            "h1:has-text('This performance is sold out')",
+            "h2:has-text('This performance is sold out')",
+            "h3:has-text('This performance is sold out')",
+            "h4:has-text('This performance is sold out')",
+            # Waitlist / Alert signup form (Etix replaces ticket table with this when sold out)
+            "button:has-text('Set Alert')",
+            "input[type='submit'][value*='Set Alert']",
+            "input[value='Set Alert']",
+            "#setAlertBtn",
+            "#set-alert-btn",
+            ".ticket-alert-form",
         ]
     )
     sold_out_text_patterns: List[str] = field(
         default_factory=lambda: [
-            r"\bsold\s*out\b",
-            r"\bthis performance is sold out\b",
+            r"\bthis\s+performance\s+is\s+sold\s+out\b",
+            r"\boff\s+sale\s+online\b",
+            r"\bwe'll\s+send\s+you\s+an\s+email\s+if\s+tickets\s+become\s+available\b",
+            r"\bwe\s+will\s+send\s+you\s+an\s+email\s+if\s+tickets\s+become\s+available\b",
         ]
     )
 
