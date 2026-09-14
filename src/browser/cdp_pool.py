@@ -53,21 +53,19 @@ class CDPBrowserPool:
         """
         import random
 
-        active_profiles = self.profile_manager.get_active_profiles()
-        if not active_profiles:
-            LOGGER.error("No active AdsPower profiles to initialize!")
-            return []
-
-        # If only a subset is needed, pick a randomized sample
-        if count_needed is not None and 0 < count_needed < len(active_profiles):
-            selected_profiles = random.sample(active_profiles, count_needed)
+        if count_needed is not None and count_needed > 0:
+            selected_profiles = self.profile_manager.allocate_random_profiles(count_needed)
             LOGGER.info(
-                f"Selected {len(selected_profiles)} randomized profiles for this run "
-                f"(needed: {count_needed}, total available: {len(active_profiles)})"
+                f"Randomly selected {len(selected_profiles)} free profiles for this run (needed: {count_needed})"
             )
         else:
-            selected_profiles = list(active_profiles)
-            LOGGER.info(f"Starting browser pool for all {len(selected_profiles)} active profiles...")
+            free_profiles = self.profile_manager.get_available_free_profiles()
+            selected_profiles = self.profile_manager.allocate_random_profiles(len(free_profiles))
+            LOGGER.info(f"Allocated all {len(selected_profiles)} available free profiles for browser pool.")
+
+        if not selected_profiles:
+            LOGGER.error("No available free profiles in AdsPower group to initialize!")
+            return []
 
         self.playwright = await async_playwright().start()
 
@@ -171,9 +169,10 @@ class CDPBrowserPool:
             LOGGER.warning(
                 f"Initiating Hot-Swap for Worker #{failing_worker.worker_index} ({failing_worker.profile.user_id}). Reason: {reason}"
             )
-            # 1. Record failing proxy as session bad
+            # 1. Record failing proxy as session bad and mark profile failed
             if failing_worker.profile.proxy_key:
                 self.profile_manager.record_bad_proxy(failing_worker.profile.proxy_key, reason)
+            self.profile_manager.mark_profile_failed(failing_worker.profile)
 
             # 2. Close failing browser
             try:
@@ -182,10 +181,10 @@ class CDPBrowserPool:
             except Exception:
                 pass
 
-            # 3. Find next reserve profile
+            # 3. Find next reserve profile strictly from target group
             reserve_prof = self.profile_manager.get_next_available_reserve()
             if not reserve_prof:
-                LOGGER.error("No reserve profiles available for hot-swap!")
+                LOGGER.error("No reserve profiles available in target group for hot-swap!")
                 return None
 
             # 4. Assign good proxy to reserve profile via AdsPower API
@@ -208,8 +207,11 @@ class CDPBrowserPool:
             return new_worker
 
     async def close_all(self) -> None:
-        """Gracefully close all browser connections and stop AdsPower processes."""
-        LOGGER.info("Closing all CDP Browser workers and AdsPower instances...")
+        """
+        Gracefully close all browser connections and stop ONLY the AdsPower instances
+        opened by this session (Strict Multi-User Concurrency ownership).
+        """
+        LOGGER.info(f"Closing {len(self.workers)} CDP Browser workers owned by this session...")
         for worker in self.workers:
             try:
                 await worker.browser.close()
@@ -220,14 +222,9 @@ class CDPBrowserPool:
             except Exception:
                 pass
             worker.profile.is_open = False
+            self.profile_manager.release_profile(worker.profile)
 
         self.workers.clear()
-
-        # Extra safety check: ensure all active browsers in AdsPower are shut down
-        try:
-            await self.client.stop_all_active_browsers()
-        except Exception:
-            pass
 
         if self.playwright:
             try:
@@ -235,4 +232,4 @@ class CDPBrowserPool:
             except Exception:
                 pass
             self.playwright = None
-        LOGGER.info("All browser workers closed successfully.")
+        LOGGER.info("All session browser workers closed successfully.")

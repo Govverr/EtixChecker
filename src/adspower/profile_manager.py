@@ -94,24 +94,31 @@ class AdsPowerProfileManager:
     async def load_and_organize_profiles(
         self,
         group_name: str = "Inventory Etix (DO NOT TOUCH)",
-        active_count: int = 12,
+        active_count: Optional[int] = None,
     ) -> List[AdsPowerProfile]:
         """
-        Fetch profiles from AdsPower, backup metadata, sort, and allocate active vs reserve.
+        Fetch profiles from AdsPower for target group, backup metadata,
+        detect externally busy browsers (multi-user concurrency), and build dynamic pool.
         """
+        self.group_name = group_name
         raw_list = await self.client.get_profiles_by_group(group_name=group_name)
         if not raw_list:
             LOGGER.warning(f"No profiles found in AdsPower for group '{group_name}'!")
+            self.profiles = []
             return []
 
         # Local backup of metadata
         self.backup_service.backup_profiles(group_name, raw_list)
 
+        # Detect currently running browsers in AdsPower (concurrency check)
+        active_browser_ids = set(await self.client.get_active_browsers())
+
         parsed: List[AdsPowerProfile] = []
         for item in raw_list:
             proxy_cfg = item.get("user_proxy_config", {})
+            uid = str(item.get("user_id", ""))
             profile = AdsPowerProfile(
-                user_id=str(item.get("user_id", "")),
+                user_id=uid,
                 name=str(item.get("name", "")),
                 serial_number=str(item.get("serial_number", "")),
                 group_id=str(item.get("group_id", "")),
@@ -123,6 +130,12 @@ class AdsPowerProfileManager:
                 proxy_type=str(proxy_cfg.get("proxy_type", "http")),
                 raw_data=item,
             )
+            # Check multi-user concurrency: if already open, do not touch!
+            if uid in active_browser_ids:
+                profile.role = ProfileRole.BUSY_EXTERNAL
+                LOGGER.info(f"Profile {profile.name} (ID: {uid}) is currently BUSY in AdsPower (opened externally).")
+            else:
+                profile.role = ProfileRole.RESERVE
             parsed.append(profile)
 
         def _sort_key(p: AdsPowerProfile) -> int:
@@ -135,34 +148,82 @@ class AdsPowerProfileManager:
             return 999999
 
         parsed.sort(key=_sort_key)
-
-        for idx, prof in enumerate(parsed):
-            if idx < active_count:
-                prof.role = ProfileRole.ACTIVE
-            else:
-                prof.role = ProfileRole.RESERVE
-
         self.profiles = parsed
-        active = [p for p in self.profiles if p.role == ProfileRole.ACTIVE]
-        reserve = [p for p in self.profiles if p.role == ProfileRole.RESERVE]
+
+        free = [p for p in self.profiles if p.role == ProfileRole.RESERVE]
+        busy = [p for p in self.profiles if p.role == ProfileRole.BUSY_EXTERNAL]
         LOGGER.info(
-            f"Loaded {len(parsed)} profiles from AdsPower (Active: {len(active)}, Reserve: {len(reserve)})"
+            f"Loaded {len(parsed)} profiles from group '{group_name}' "
+            f"(Available/Free: {len(free)}, Busy externally: {len(busy)})"
         )
         return self.profiles
 
+    def get_available_free_profiles(self) -> List[AdsPowerProfile]:
+        """Get all profiles that are strictly free and belonging to target group."""
+        return [
+            p for p in self.profiles
+            if p.role in (ProfileRole.RESERVE, ProfileRole.ACTIVE)
+            and p.role not in (ProfileRole.IN_USE, ProfileRole.BUSY_EXTERNAL, ProfileRole.FAILED, ProfileRole.DISABLED)
+        ]
+
+    def get_busy_external_profiles(self) -> List[AdsPowerProfile]:
+        """Get profiles currently opened by other tasks/users."""
+        return [p for p in self.profiles if p.role == ProfileRole.BUSY_EXTERNAL]
+
     def get_active_profiles(self) -> List[AdsPowerProfile]:
-        return [p for p in self.profiles if p.role == ProfileRole.ACTIVE]
+        """Get active profiles or available free profiles."""
+        active = [p for p in self.profiles if p.role == ProfileRole.ACTIVE]
+        if not active:
+            return self.get_available_free_profiles()
+        return active
 
     def get_reserve_profiles(self) -> List[AdsPowerProfile]:
-        return [p for p in self.profiles if p.role == ProfileRole.RESERVE]
+        """Get available reserve profiles."""
+        return self.get_available_free_profiles()
+
+    def allocate_random_profiles(self, count_needed: int) -> List[AdsPowerProfile]:
+        """
+        Randomly pick count_needed free profiles from target group (random.sample)
+        and transition them to IN_USE state.
+        """
+        available = self.get_available_free_profiles()
+        if not available:
+            return []
+
+        actual_count = min(count_needed, len(available))
+        chosen = random.sample(available, actual_count)
+        for p in chosen:
+            p.role = ProfileRole.IN_USE
+        return chosen
 
     def get_next_available_reserve(self) -> Optional[AdsPowerProfile]:
-        """Get an unallocated reserve profile."""
-        reserves = [p for p in self.profiles if p.role == ProfileRole.RESERVE]
-        if reserves:
-            # Pick randomly from reserve pool
-            return random.choice(reserves)
+        """
+        Get an unallocated reserve profile STRICTLY from target group 'Inventory Etix (DO NOT TOUCH)',
+        randomly chosen, and mark it IN_USE.
+        """
+        available = [
+            p for p in self.profiles
+            if p.group_name == getattr(self, "group_name", "Inventory Etix (DO NOT TOUCH)")
+            and p.role in (ProfileRole.RESERVE, ProfileRole.ACTIVE)
+            and p.role not in (ProfileRole.IN_USE, ProfileRole.BUSY_EXTERNAL, ProfileRole.FAILED, ProfileRole.DISABLED)
+        ]
+        if available:
+            chosen = random.choice(available)
+            chosen.role = ProfileRole.IN_USE
+            LOGGER.info(
+                f"Selected hot-swap reserve profile from group '{chosen.group_name}': {chosen.name} ({chosen.user_id})"
+            )
+            return chosen
         return None
+
+    def release_profile(self, profile: AdsPowerProfile) -> None:
+        """Release profile back to reserve pool."""
+        if profile.role not in (ProfileRole.BUSY_EXTERNAL, ProfileRole.FAILED, ProfileRole.DISABLED):
+            profile.role = ProfileRole.RESERVE
+
+    def mark_profile_failed(self, profile: AdsPowerProfile) -> None:
+        """Mark profile as failed for this check cycle."""
+        profile.role = ProfileRole.FAILED
 
     async def setup_reserve_profile_with_good_proxy(
         self,
@@ -171,6 +232,7 @@ class AdsPowerProfileManager:
     ) -> bool:
         """
         Update reserve profile proxy via AdsPower API before launching.
+        Ensures proxy is valid and clean.
         """
         proxy_str = good_proxy_str or self.get_random_good_proxy()
         if not proxy_str:

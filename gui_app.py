@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import queue
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
 import pandas as pd
@@ -17,7 +18,15 @@ from tkinter import messagebox
 from src.adspower.backup_service import ProfileBackupService
 from src.adspower.client import AdsPowerClient
 from src.adspower.profile_manager import AdsPowerProfileManager
-from src.config.settings import AppConfig, CONFIG
+from src.config.settings import (
+    AppConfig,
+    CONFIG,
+    MIN_SAFE_DELAYS,
+    estimate_check_duration_seconds,
+    reload_config,
+    save_delays_to_dotenv,
+    validate_and_clamp_delay,
+)
 from src.domain.enums import ShowStatus
 from src.domain.models import CheckResult, Show
 from src.etix.checker import EtixCheckEngine
@@ -419,6 +428,7 @@ class EtixGuiApp(ctk.CTk):
 
         self.tab_dashboard = self.tabview.add("📊  Панель мониторинга")
         self.tab_logs = self.tabview.add("📜  Журнал событий (Лог)")
+        self.tab_settings = self.tabview.add("⚙️  Настройки задержек")
 
         # Quick Selection Bar
         self.selection_bar = ctk.CTkFrame(self.tab_dashboard, fg_color="transparent")
@@ -481,6 +491,429 @@ class EtixGuiApp(ctk.CTk):
             wrap="none",
         )
         self.txt_log.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Tab 3: Delays Configuration
+        self._build_delays_tab()
+
+    def _build_delays_tab(self) -> None:
+        """Build user configuration interface for pipeline delays with hardware-enforced minimums."""
+        scroll = ctk.CTkScrollableFrame(self.tab_settings, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # 1. Info Banner Card
+        banner = ctk.CTkFrame(
+            scroll,
+            fg_color=COLOR_CARD_INNER,
+            border_color=COLOR_CARD_BORDER,
+            border_width=1,
+            corner_radius=10,
+        )
+        banner.pack(fill="x", pady=(0, 14), padx=4)
+
+        b_inner = ctk.CTkFrame(banner, fg_color="transparent")
+        b_inner.pack(fill="x", padx=16, pady=12)
+
+        lbl_b_title = ctk.CTkLabel(
+            b_inner,
+            text="⚙️  Пользовательская калибровка задержек конвейера",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        lbl_b_title.pack(anchor="w")
+
+        lbl_b_desc = ctk.CTkLabel(
+            b_inner,
+            text=(
+                "Настройте интервалы навигации, паузы синхронизации React/MUI, сдвиги кликов и время удержания корзин.\n"
+                "🛡️ Аппаратная защита: программа физически блокирует установку значений ниже безопасного порога (MIN_SAFE_DELAYS + 100 мс буфер)."
+            ),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            text_color=COLOR_TEXT_MUTED,
+            justify="left",
+        )
+        lbl_b_desc.pack(anchor="w", pady=(4, 0))
+
+        # 2. Input Fields Grid
+        grid_card = ctk.CTkFrame(
+            scroll,
+            fg_color=COLOR_CARD_INNER,
+            border_color=COLOR_CARD_BORDER,
+            border_width=1,
+            corner_radius=10,
+        )
+        grid_card.pack(fill="x", pady=(0, 14), padx=4)
+
+        g_inner = ctk.CTkFrame(grid_card, fg_color="transparent")
+        g_inner.pack(fill="x", padx=16, pady=14)
+
+        self.delay_entries: Dict[str, Any] = {}
+
+        # Parameter 1: Batch Nav Delay
+        self._create_range_delay_row(
+            g_inner,
+            row=0,
+            label="1. Интервал навигации между воркерами (мс):",
+            sub="Разнос старта браузеров во времени. Аппаратный минимум: 350 мс",
+            key="batch_nav",
+            default_val=CONFIG.batch_nav_delay_ms,
+            min_val=MIN_SAFE_DELAYS["batch_nav_delay_ms"],
+        )
+
+        # Parameter 2: After Click Sleep
+        self._create_range_delay_row(
+            g_inner,
+            row=1,
+            label="2. Пауза после выбора количества (мс):",
+            sub="Время для обновления состояния React/MUI combobox. Аппаратный минимум: 500 мс",
+            key="after_click",
+            default_val=CONFIG.after_click_sleep_ms,
+            min_val=MIN_SAFE_DELAYS["after_click_sleep_ms"],
+        )
+
+        # Parameter 3: Add Tickets Stagger
+        self._create_range_delay_row(
+            g_inner,
+            row=2,
+            label="3. Сдвиг клика «Add Tickets» между воркерами (мс):",
+            sub="Интервал параллельного добавления билетов в корзины. Аппаратный минимум: 900 мс",
+            key="add_stagger",
+            default_val=CONFIG.add_sequential_delay_ms,
+            min_val=MIN_SAFE_DELAYS["add_sequential_delay_ms"],
+        )
+
+        # Parameter 4: Hold Duration
+        self._create_single_delay_row(
+            g_inner,
+            row=3,
+            label="4. Время удержания брони перед очисткой (сек):",
+            sub="Пауза удержания зарезервированных билетов перед Clear Cart. Аппаратный минимум: 2.2 с",
+            key="hold_seconds",
+            default_val=CONFIG.delay_before_clear_carts_s,
+            min_val=MIN_SAFE_DELAYS["delay_before_clear_carts_s"],
+            unit="сек",
+        )
+
+        # Parameter 5: Clear Cart Stagger
+        self._create_range_delay_row(
+            g_inner,
+            row=4,
+            label="5. Сдвиг очистки корзин между воркерами (мс):",
+            sub="Интервал освобождения инвентаря в корзинах. Аппаратный минимум: 400 мс",
+            key="clear_stagger",
+            default_val=CONFIG.clear_cart_stagger_ms,
+            min_val=MIN_SAFE_DELAYS["clear_cart_stagger_ms"],
+        )
+
+        # Parameter 6: Navigation Timeout
+        self._create_single_delay_row(
+            g_inner,
+            row=5,
+            label="6. Таймаут загрузки страницы / прокси (мс):",
+            sub="Максимальное ожидание ответа страницы перед Hot-Swap заменой. Аппаратный минимум: 12000 мс",
+            key="nav_timeout",
+            default_val=CONFIG.nav_timeout,
+            min_val=MIN_SAFE_DELAYS["nav_timeout"],
+            unit="мс",
+        )
+
+        # 3. Live Duration Estimator Badge
+        est_card = ctk.CTkFrame(
+            scroll,
+            fg_color="#182038",
+            border_color="#312e81",
+            border_width=1,
+            corner_radius=10,
+        )
+        est_card.pack(fill="x", pady=(0, 14), padx=4)
+
+        est_inner = ctk.CTkFrame(est_card, fg_color="transparent")
+        est_inner.pack(fill="x", padx=16, pady=10)
+
+        self.lbl_est_duration = ctk.CTkLabel(
+            est_inner,
+            text="⏱  Ориентировочная скорость проверки 1 шоу (на 12 профилей): ~45.0 сек",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#818cf8",
+        )
+        self.lbl_est_duration.pack(side="left")
+
+        # 4. Action Buttons (Save and Reset)
+        btn_box = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_box.pack(fill="x", padx=4, pady=6)
+
+        btn_save = ctk.CTkButton(
+            btn_box,
+            text="💾  Сохранить настройки задержек",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            fg_color=COLOR_BTN_PRIMARY,
+            hover_color=COLOR_BTN_PRIMARY_HOVER,
+            text_color="#ffffff",
+            height=38,
+            corner_radius=8,
+            command=self._on_save_delays_clicked,
+        )
+        btn_save.pack(side="left", padx=(0, 10))
+
+        btn_reset = ctk.CTkButton(
+            btn_box,
+            text="🔄  Сбросить по умолчанию",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color=COLOR_BTN_SEC,
+            hover_color=COLOR_BTN_SEC_HOVER,
+            border_color=COLOR_BTN_SEC_BORDER,
+            border_width=1,
+            text_color="#cbd5e1",
+            height=38,
+            corner_radius=8,
+            command=self._on_reset_delays_clicked,
+        )
+        btn_reset.pack(side="left")
+
+    def _create_range_delay_row(
+        self,
+        parent,
+        row: int,
+        label: str,
+        sub: str,
+        key: str,
+        default_val: Tuple[int, int],
+        min_val: float,
+    ) -> None:
+        row_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        row_frame.pack(fill="x", pady=8)
+
+        left = ctk.CTkFrame(row_frame, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True)
+
+        lbl = ctk.CTkLabel(
+            left,
+            text=label,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        lbl.pack(anchor="w")
+
+        lbl_sub = ctk.CTkLabel(
+            left,
+            text=sub,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color=COLOR_TEXT_MUTED,
+        )
+        lbl_sub.pack(anchor="w")
+
+        right = ctk.CTkFrame(row_frame, fg_color="transparent")
+        right.pack(side="right")
+
+        ent_min = ctk.CTkEntry(
+            right,
+            width=70,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color="#0b0f19",
+            border_color="#334155",
+            justify="center",
+        )
+        ent_min.insert(0, str(default_val[0]))
+        ent_min.pack(side="left", padx=4)
+
+        lbl_dash = ctk.CTkLabel(right, text="—", font=ctk.CTkFont(size=12), text_color=COLOR_TEXT_MUTED)
+        lbl_dash.pack(side="left")
+
+        ent_max = ctk.CTkEntry(
+            right,
+            width=70,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color="#0b0f19",
+            border_color="#334155",
+            justify="center",
+        )
+        ent_max.insert(0, str(default_val[1]))
+        ent_max.pack(side="left", padx=4)
+
+        lbl_unit = ctk.CTkLabel(right, text="мс", font=ctk.CTkFont(size=11), text_color=COLOR_TEXT_MUTED)
+        lbl_unit.pack(side="left", padx=(0, 4))
+
+        self.delay_entries[key] = {
+            "type": "range",
+            "min_ent": ent_min,
+            "max_ent": ent_max,
+            "min_bound": min_val,
+        }
+
+    def _create_single_delay_row(
+        self,
+        parent,
+        row: int,
+        label: str,
+        sub: str,
+        key: str,
+        default_val: float,
+        min_val: float,
+        unit: str,
+    ) -> None:
+        row_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        row_frame.pack(fill="x", pady=8)
+
+        left = ctk.CTkFrame(row_frame, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True)
+
+        lbl = ctk.CTkLabel(
+            left,
+            text=label,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        lbl.pack(anchor="w")
+
+        lbl_sub = ctk.CTkLabel(
+            left,
+            text=sub,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color=COLOR_TEXT_MUTED,
+        )
+        lbl_sub.pack(anchor="w")
+
+        right = ctk.CTkFrame(row_frame, fg_color="transparent")
+        right.pack(side="right")
+
+        ent = ctk.CTkEntry(
+            right,
+            width=90,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color="#0b0f19",
+            border_color="#334155",
+            justify="center",
+        )
+        ent.insert(0, str(default_val))
+        ent.pack(side="left", padx=4)
+
+        lbl_unit = ctk.CTkLabel(right, text=unit, font=ctk.CTkFont(size=11), text_color=COLOR_TEXT_MUTED)
+        lbl_unit.pack(side="left", padx=(0, 4))
+
+        self.delay_entries[key] = {
+            "type": "single",
+            "entry": ent,
+            "min_bound": min_val,
+        }
+
+    def _on_save_delays_clicked(self) -> None:
+        """Validate input values, clamp to MIN_SAFE_DELAYS, save to .env and reload CONFIG."""
+        updates: Dict[str, Any] = {}
+        had_auto_clamp = False
+
+        try:
+            # 1. batch_nav
+            c = self.delay_entries["batch_nav"]
+            lo = max(int(c["min_ent"].get().strip()), int(c["min_bound"]))
+            hi = max(int(c["max_ent"].get().strip()), lo)
+            if int(c["min_ent"].get().strip()) < c["min_bound"]:
+                had_auto_clamp = True
+            c["min_ent"].delete(0, "end")
+            c["min_ent"].insert(0, str(lo))
+            c["max_ent"].delete(0, "end")
+            c["max_ent"].insert(0, str(hi))
+            updates["ETIX_BATCH_NAV_DELAY_MS"] = f"{lo}-{hi}"
+
+            # 2. after_click
+            c = self.delay_entries["after_click"]
+            lo = max(int(c["min_ent"].get().strip()), int(c["min_bound"]))
+            hi = max(int(c["max_ent"].get().strip()), lo)
+            if int(c["min_ent"].get().strip()) < c["min_bound"]:
+                had_auto_clamp = True
+            c["min_ent"].delete(0, "end")
+            c["min_ent"].insert(0, str(lo))
+            c["max_ent"].delete(0, "end")
+            c["max_ent"].insert(0, str(hi))
+            updates["ETIX_AFTER_CLICK_SLEEP_MS"] = f"{lo}-{hi}"
+
+            # 3. add_stagger
+            c = self.delay_entries["add_stagger"]
+            lo = max(int(c["min_ent"].get().strip()), int(c["min_bound"]))
+            hi = max(int(c["max_ent"].get().strip()), lo)
+            if int(c["min_ent"].get().strip()) < c["min_bound"]:
+                had_auto_clamp = True
+            c["min_ent"].delete(0, "end")
+            c["min_ent"].insert(0, str(lo))
+            c["max_ent"].delete(0, "end")
+            c["max_ent"].insert(0, str(hi))
+            updates["ETIX_ADD_SEQUENTIAL_DELAY_MS"] = f"{lo}-{hi}"
+
+            # 4. hold_seconds
+            c = self.delay_entries["hold_seconds"]
+            raw_s = float(c["entry"].get().strip())
+            safe_s = max(raw_s, float(c["min_bound"]))
+            if raw_s < c["min_bound"]:
+                had_auto_clamp = True
+            c["entry"].delete(0, "end")
+            c["entry"].insert(0, f"{safe_s:.1f}")
+            updates["ETIX_DELAY_BEFORE_CLEAR_CARTS_S"] = f"{safe_s:.1f}"
+
+            # 5. clear_stagger
+            c = self.delay_entries["clear_stagger"]
+            lo = max(int(c["min_ent"].get().strip()), int(c["min_bound"]))
+            hi = max(int(c["max_ent"].get().strip()), lo)
+            if int(c["min_ent"].get().strip()) < c["min_bound"]:
+                had_auto_clamp = True
+            c["min_ent"].delete(0, "end")
+            c["min_ent"].insert(0, str(lo))
+            c["max_ent"].delete(0, "end")
+            c["max_ent"].insert(0, str(hi))
+            updates["ETIX_CLEAR_CART_STAGGER_MS"] = f"{lo}-{hi}"
+
+            # 6. nav_timeout
+            c = self.delay_entries["nav_timeout"]
+            raw_t = int(c["entry"].get().strip())
+            safe_t = max(raw_t, int(c["min_bound"]))
+            if raw_t < c["min_bound"]:
+                had_auto_clamp = True
+            c["entry"].delete(0, "end")
+            c["entry"].insert(0, str(safe_t))
+            updates["ETIX_NAV_TIMEOUT"] = str(safe_t)
+
+            # Persist and reload
+            save_delays_to_dotenv(updates)
+            new_cfg = reload_config()
+
+            est = estimate_check_duration_seconds(12, new_cfg)
+            self.lbl_est_duration.configure(
+                text=f"⏱  Ориентировочная скорость проверки 1 шоу (на 12 профилей): ~{est} сек"
+            )
+
+            clamp_note = "\n\n⚠️ Некоторые значения были автоматически скорректированы до безопасного минимума." if had_auto_clamp else ""
+            messagebox.showinfo(
+                "Настройки задержек",
+                f"Настройки задержек успешно сохранены в .env и применены!{clamp_note}\n\nРасчетное время: ~{est} сек на шоу (12 профилей)."
+            )
+            self._log(f"⚙️ Сохранены новые задержки: {updates}")
+
+        except Exception as exc:
+            messagebox.showerror("Ошибка валидации", f"Некорректный формат чисел: {exc}")
+
+    def _on_reset_delays_clicked(self) -> None:
+        """Reset delays in UI to safe human defaults."""
+        defaults = {
+            "batch_nav": (600, 1100),
+            "after_click": (500, 900),
+            "add_stagger": (1000, 1800),
+            "hold_seconds": 4.0,
+            "clear_stagger": (600, 1000),
+            "nav_timeout": 18000,
+        }
+        for k, v in defaults.items():
+            ent_info = self.delay_entries.get(k)
+            if not ent_info:
+                continue
+            if ent_info["type"] == "range":
+                ent_info["min_ent"].delete(0, "end")
+                ent_info["min_ent"].insert(0, str(v[0]))
+                ent_info["max_ent"].delete(0, "end")
+                ent_info["max_ent"].insert(0, str(v[1]))
+            else:
+                ent_info["entry"].delete(0, "end")
+                ent_info["entry"].insert(0, str(v))
+
+        self.lbl_est_duration.configure(
+            text="⏱  Ориентировочная скорость проверки 1 шоу (на 12 профилей): ~45.0 сек"
+        )
 
     def _create_metric_chip(self, parent, label: str, value: str) -> ctk.CTkFrame:
         """Create a sleek metric badge chip."""
@@ -600,16 +1033,17 @@ class EtixGuiApp(ctk.CTk):
                 if alive:
                     profiles = await self.profile_manager.load_and_organize_profiles(
                         group_name=CONFIG.adspower_group_name,
-                        active_count=CONFIG.active_profiles_count,
                     )
-                    active = len(self.profile_manager.get_active_profiles())
-                    reserve = len(self.profile_manager.get_reserve_profiles())
+                    free_count = len(self.profile_manager.get_available_free_profiles())
+                    busy_count = len(self.profile_manager.get_busy_external_profiles())
+                    total_count = len(profiles)
+                    busy_tag = f" • {busy_count} занято" if busy_count > 0 else ""
                     self.event_queue.put(
                         (
                             "adspower_status",
                             True,
-                            f"AdsPower: Активно ({active} активн. / {reserve} резерв)",
-                            active,
+                            f"AdsPower: {free_count} своб. из {total_count}{busy_tag}",
+                            free_count,
                         )
                     )
                 else:
@@ -655,6 +1089,33 @@ class EtixGuiApp(ctk.CTk):
             )
             return
 
+        selected_shows = [c.show for c in selected_cards]
+
+        # Pre-flight Concurrency & Profile Sufficiency Check
+        free_profiles = self.profile_manager.get_available_free_profiles()
+        busy_profiles = self.profile_manager.get_busy_external_profiles()
+
+        max_needed_workers = 1
+        for s in selected_shows:
+            limit = s.max_per_order if s.max_per_order and s.max_per_order > 0 else 1
+            needed_for_show = math.ceil(s.target_total / limit)
+            if needed_for_show > max_needed_workers:
+                max_needed_workers = needed_for_show
+
+        if free_profiles and len(free_profiles) < max_needed_workers:
+            busy_ids = [p.user_id for p in busy_profiles]
+            busy_details = (
+                f"\n\n👥 Занято другими задачами/пользователями: {len(busy_profiles)} шт. (ID: {', '.join(busy_ids[:5])}{'...' if len(busy_ids) > 5 else ''})"
+                if busy_profiles else ""
+            )
+            messagebox.showwarning(
+                "Недостаточно свободных профилей",
+                f"Для проверки выбранных событий требуется: {max_needed_workers} свободных профилей.\n"
+                f"Доступно свободно в группе: {len(free_profiles)} профилей.{busy_details}\n\n"
+                f"Пожалуйста, закройте открытые браузеры в AdsPower или добавьте новые профили в группу '{CONFIG.adspower_group_name}'."
+            )
+            return
+
         self.is_running = True
         self.btn_start.configure(state="disabled", text="⏳  Проверка выполняется...")
         self.stat_status.lbl_val.configure(text="Выполняется...", text_color="#f59e0b")
@@ -669,8 +1130,6 @@ class EtixGuiApp(ctk.CTk):
             card.lbl_count.configure(text=f"0 / {card.show.target_total}", text_color=COLOR_TEXT_MUTED)
             card.progress_bar.configure(progress_color="#6366f1")
             card.progress_bar.set(0.0)
-
-        selected_shows = [c.show for c in selected_cards]
 
         def worker():
             async def run():

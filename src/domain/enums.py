@@ -18,4 +18,7 @@ class ShowStatus(str, Enum):
 class ProfileRole(str, Enum):
     ACTIVE = "ACTIVE"
     RESERVE = "RESERVE"
+    IN_USE = "IN_USE"
+    BUSY_EXTERNAL = "BUSY_EXTERNAL"
+    FAILED = "FAILED"
     DISABLED = "DISABLED"

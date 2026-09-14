@@ -272,6 +272,15 @@ class EtixCartHandler:
             "input[type='submit'][value*='Add to Cart']",
             "button.btn-purchase",
             "button#purchase-btn",
+            "button#submit_tickets",
+            "input#submit_tickets",
+            "input[name='submit']",
+            "button[type='submit']",
+            "button:has-text('Purchase')",
+            "button:has-text('PURCHASE')",
+            "button:has-text('Continue')",
+            "button:has-text('Next')",
+            "button:has-text('Select Tickets')",
             "button:has-text('Купить')",
             "button:has-text('Добавить в корзину')",
         ]
@@ -287,7 +296,7 @@ class EtixCartHandler:
         try:
             btn = page.get_by_role(
                 "button",
-                name=re.compile(r"ADD\s*TICKETS|ADD\s*TO\s*CART|КУПИТЬ", re.I),
+                name=re.compile(r"ADD\s*TICKETS|ADD\s*TO\s*CART|PURCHASE|CONTINUE|КУПИТЬ", re.I),
             ).first
             if await btn.is_visible(timeout=500):
                 return btn
@@ -395,11 +404,22 @@ class EtixCartHandler:
         except Exception as alert_exc:
             LOGGER.debug(f"Alert check exception: {alert_exc}")
 
-        # Check if we arrived in cart / checkout
+        # Check if we arrived in cart / checkout URL or container
         if await self.detector.is_cart_page(page):
             return True, selected_qty, "Успешно добавлено в корзину"
 
-        return True, selected_qty, f"Зарезервировано ({selected_qty} шт.)"
+        # Check for visible shopping cart badge, table, or order summary in DOM
+        try:
+            cart_elem = page.locator(
+                ".cart-item, #cart-container, .order-summary, table.cart, #shopping-cart, .shoppingCart, [class*='cart-item'], .cart-table"
+            ).first
+            if await cart_elem.is_visible(timeout=1200):
+                return True, selected_qty, "Успешно добавлено в корзину"
+        except Exception:
+            pass
+
+        # If neither cart URL nor cart container is confirmed, do NOT report false success!
+        return False, 0, "Не удалось подтвердить добавление в корзину (страница корзины не открылась)"
 
     async def clear_cart(self, page: Page) -> None:
         """Release tickets by clearing the shopping cart."""

@@ -39,6 +39,15 @@ def make_show_id(name: str, url: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
+def extract_performance_id(url: str) -> Optional[str]:
+    """Extract numeric performance/event id from Etix or partner URL."""
+    import re
+    m = re.search(r"(?:/p/|performance_id=|/e/|event_id=)(\d+)", url)
+    if m:
+        return m.group(1)
+    return None
+
+
 class EtixCheckEngine:
     """Orchestrates multi-worker ticket availability checks via AdsPower CDP sessions."""
 
@@ -138,15 +147,17 @@ class EtixCheckEngine:
                 f"Please ensure AdsPower is running and Local API is enabled."
             )
 
-        # Load and allocate profiles
+        # Load and organize dynamic profile pool with concurrency detection
         profiles = await self.profile_manager.load_and_organize_profiles(
             group_name=self.config.adspower_group_name,
-            active_count=self.config.active_profiles_count,
         )
         if not profiles:
             raise RuntimeError(
-                f"No profiles found in AdsPower group '{self.config.adspower_group_name}'!"
+                f"В группе AdsPower '{self.config.adspower_group_name}' не найдено ни одного профиля!"
             )
+
+        free_profiles = self.profile_manager.get_available_free_profiles()
+        busy_profiles = self.profile_manager.get_busy_external_profiles()
 
         # Calculate maximum workers needed across all shows in this run
         max_needed_workers = 1
@@ -156,11 +167,26 @@ class EtixCheckEngine:
             if needed_for_show > max_needed_workers:
                 max_needed_workers = needed_for_show
 
-        profiles_count_to_start = min(max_needed_workers, self.config.active_profiles_count)
+        profiles_count_to_start = max_needed_workers
         LOGGER.info(
             f"Calculated maximum needed profiles for run: {profiles_count_to_start} "
-            f"(target max: {max_needed_workers}, active pool limit: {self.config.active_profiles_count})"
+            f"(Target pool needed: {max_needed_workers}, Available free: {len(free_profiles)}, Busy externally: {len(busy_profiles)})"
         )
+
+        # Multi-user concurrency barrier: if insufficient free profiles, BLOCK run with clear explanation
+        if len(free_profiles) < profiles_count_to_start:
+            busy_ids = [p.user_id for p in busy_profiles]
+            busy_details = (
+                f" Занято другими процессами/пользователями: {len(busy_profiles)} шт. "
+                f"(ID: {', '.join(busy_ids[:6])}{'...' if len(busy_ids) > 6 else ''})."
+                if busy_profiles else ""
+            )
+            raise RuntimeError(
+                f"Недостаточно свободных профилей в группе '{self.config.adspower_group_name}'.\n"
+                f"Требуется для проверки: {profiles_count_to_start} профилей.\n"
+                f"Свободно в группе: {len(free_profiles)} профилей.{busy_details}\n"
+                f"Пожалуйста, закройте открытые профили в AdsPower или добавьте новые свободные профили в группу."
+            )
 
         # Initialize CDP Browser Pool with only needed profiles
         self.cdp_pool = CDPBrowserPool(
@@ -230,8 +256,8 @@ class EtixCheckEngine:
         """Check a single event URL across the pool of browser workers."""
         LOGGER.info(f"--> Checking event '{show.name}' (Target: {show.target_total} tickets, Ticket index: {show.ticket_index})")
 
-        # Step 1: Open show URL in primary worker
-        primary_worker = workers[0]
+        # Step 1: Open show URL in primary worker (randomly chosen for uniform proxy distribution)
+        primary_worker = random.choice(workers)
         try:
             await primary_worker.page.goto(
                 show.url,
@@ -317,15 +343,23 @@ class EtixCheckEngine:
         # Step 4: Check DataDome Block / Slider and execute 3-step recovery
         accessible_primary = await self._ensure_worker_accessible(primary_worker, show)
         if not accessible_primary:
-            screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="blocked")
+            is_blocked = (
+                await self.detector.is_blocked_page(primary_worker.page)
+                or await self.detector.is_slider_captcha(primary_worker.page)
+            )
+            screen = await self.reporter.save_screenshot(
+                primary_worker.page, show.name, prefix="blocked" if is_blocked else "failed"
+            )
             return CheckResult(
                 show_id=show.show_id,
                 name=show.name,
                 url=show.url,
-                status=ShowStatus.BLOCKED,
+                status=ShowStatus.BLOCKED if is_blocked else ShowStatus.FAILED,
                 target=show.target_total,
                 reserved=0,
-                details="Заблокировано защитой DataDome (все 3 шага восстановления исчерпаны)",
+                details="Заблокировано защитой DataDome (все 3 шага восстановления исчерпаны)"
+                if is_blocked
+                else "Не удалось подтвердить доступность страницы события или контролов билетов",
                 screenshot_path=screen,
             )
         primary_worker = accessible_primary
@@ -448,23 +482,27 @@ class EtixCheckEngine:
             else:
                 details_list.append(f"[{w_tag}] Неизвестный результат: {res}")
 
-        # Step 8: Calculate overall status
-        if total_reserved >= show.target_total and not details_list:
+        # Step 8: Calculate overall status with accurate cart and ticket count
+        active_workers_count = len(active_cart_workers)
+        success_workers_count = len(success_workers)
+
+        if total_reserved >= show.target_total and not details_list and (success_workers_count == active_workers_count or active_workers_count == 0):
             status = ShowStatus.OK
-            details_str = f"Успешно зарезервировано {total_reserved}/{show.target_total}"
+            details_str = f"Успешно зарезервировано {total_reserved}/{show.target_total} ({success_workers_count}/{active_workers_count} корзин)"
         elif total_reserved > 0:
             status = ShowStatus.PARTIAL
-            details_str = f"Частично доступно: {total_reserved}/{show.target_total}."
+            details_str = f"Частично набрано: {total_reserved}/{show.target_total} ({success_workers_count}/{active_workers_count} корзин)."
             if details_list:
                 details_str += " " + "; ".join(details_list)
         else:
             status = ShowStatus.INSUFFICIENT
-            details_str = "Недостаточно билетов."
+            details_str = f"0/{show.target_total} билетов набрано."
             if details_list:
                 details_str += " " + "; ".join(details_list)
 
         LOGGER.info(
-            f"Event '{show.name}' result: [{status.value}] Reserved: {total_reserved}/{show.target_total}"
+            f"Event '{show.name}' result: [{status.value}] Reserved: {total_reserved}/{show.target_total} "
+            f"({success_workers_count}/{active_workers_count} carts)"
         )
 
         # Step 9: Staggered release of carts after hold delay
@@ -543,6 +581,7 @@ class EtixCheckEngine:
 
         current_worker = worker
         target_path = show.url.split("?")[0].rstrip("/")
+        perf_id = extract_performance_id(show.url)
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -560,15 +599,27 @@ class EtixCheckEngine:
                 except Exception:
                     pass
 
-                # 2. Check if current URL needs navigation
-                curr_url = (current_worker.page.url or "").strip()
+                # 2. Check if current URL needs navigation (flexible performance_id and partner matching)
+                curr_url = (current_worker.page.url or "").strip().lower()
+                target_path_lower = target_path.lower()
+
+                on_target = False
+                if perf_id and perf_id in curr_url:
+                    on_target = True
+                elif target_path_lower in curr_url:
+                    on_target = True
+                elif any(d in curr_url for d in ["etix.com", "cascadetickets.com", "catscradle"]) and not any(
+                    err in curr_url for err in ["about:blank", "chrome-error://", "chrome://", "start.adspower.net"]
+                ):
+                    on_target = True
+
                 needs_nav = (
                     not curr_url
                     or curr_url == "about:blank"
                     or "chrome-error://" in curr_url
                     or "chrome://" in curr_url
                     or "start.adspower.net" in curr_url
-                    or target_path not in curr_url
+                    or not on_target
                 )
 
                 if needs_nav:
@@ -611,10 +662,11 @@ class EtixCheckEngine:
                         and not await self.detector.is_blocked_page(current_worker.page)
                         and not await self.detector.is_slider_captcha(current_worker.page)
                     ):
-                        LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider solved!")
-                        # If page hasn't auto-redirected or is still showing challenge URL, navigate to target event
+                        LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider solved! Waiting for session sync...")
+                        await human_sleep((1000, 1800))
                         curr_u = (current_worker.page.url or "").lower()
-                        if "captcha-delivery" in curr_u or "datadome" in curr_u or target_path not in curr_u:
+                        # If page hasn't auto-redirected back or is still on challenge frame
+                        if "captcha" in curr_u or "datadome" in curr_u or (perf_id and perf_id not in curr_u):
                             LOGGER.info(f"[Worker #{current_worker.worker_index}] Navigating back to event URL {show.url} after solving captcha...")
                             try:
                                 await current_worker.page.goto(
@@ -673,11 +725,13 @@ class EtixCheckEngine:
                     )
                     return current_worker
 
-                # 6. Verify Ticket Controls & DOM Readiness
+                # 6. Verify Ticket Controls & DOM Readiness (Dismiss modals first)
+                await close_blocking_popups(current_worker.page)
+
                 try:
                     await current_worker.page.wait_for_selector(
                         ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select, button:has-text('Add Tickets'), input[value*='Add Tickets'], div[role='alert']",
-                        timeout=8000,
+                        timeout=5000,
                     )
                 except Exception:
                     pass
@@ -685,15 +739,25 @@ class EtixCheckEngine:
                 controls = await self.cart_handler.get_all_quantity_controls(current_worker.page)
                 add_btn = await self.cart_handler.find_add_button(current_worker.page)
 
-                if controls or add_btn:
+                # Also check for presence of ticket pricing table / event info / selection forms
+                has_ticket_content = False
+                try:
+                    has_ticket_content = await current_worker.page.locator(
+                        ".ticket-type, .price-level, #ticket-form, form[name='performanceSaleForm'], .ticket-table, .performance-detail, .price-list, .ticket-selection"
+                    ).first.is_visible(timeout=500)
+                except Exception:
+                    pass
+
+                if controls or add_btn or has_ticket_content:
                     LOGGER.info(
-                        f"[Worker #{current_worker.worker_index}] Verified READY on {show.url} (Found {len(controls)} controls)"
+                        f"[Worker #{current_worker.worker_index}] Verified READY on {show.url} "
+                        f"(Controls: {len(controls)}, Add button: {bool(add_btn)}, Content: {bool(has_ticket_content)})"
                     )
                     return current_worker
 
-                # If we're on the target URL or etix.com but controls are not yet ready, reload on next attempt
+                # If on venue domain or etix but controls not yet visible, reload softly
                 curr_url = current_worker.page.url or ""
-                if "etix.com" in curr_url:
+                if any(d in curr_url for d in ["etix.com", "cascadetickets.com", "catscradle"]):
                     LOGGER.warning(
                         f"[Worker #{current_worker.worker_index}] URL is open but controls not rendered (attempt {attempt}/{max_retries}). Reloading..."
                     )

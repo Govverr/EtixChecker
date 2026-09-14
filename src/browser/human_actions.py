@@ -44,7 +44,7 @@ async def accept_cookies_if_present(page: Page, timeout_ms: int = 1500) -> None:
 
 
 async def close_blocking_popups(page: Page, timeout_ms: int = 1500) -> None:
-    """Close age verification, newsletter popups, or idle modals."""
+    """Close age verification, newsletter popups, idle modals, and venue disclaimer dialogues."""
     popup_selectors = [
         "button[aria-label='Close']",
         "button.close",
@@ -54,6 +54,21 @@ async def close_blocking_popups(page: Page, timeout_ms: int = 1500) -> None:
         "button:has-text('Close')",
         "button:has-text('Закрыть')",
         "button:has-text('Yes, I am over 21')",
+        "button:has-text('I Agree')",
+        "button:has-text('Agree')",
+        "button:has-text('I agree')",
+        "button:has-text('Accept')",
+        "button:has-text('Got it')",
+        "button:has-text('Understood')",
+        "button:has-text('Enter Site')",
+        "button:has-text('Enter')",
+        "button:has-text('Continue')",
+        "button:has-text('Proceed')",
+        "button:has-text('OK')",
+        "button[data-dismiss='modal']",
+        "button[data-bs-dismiss='modal']",
+        "a[data-dismiss='modal']",
+        ".modal-close",
     ]
     for sel in popup_selectors:
         try:
@@ -63,6 +78,15 @@ async def close_blocking_popups(page: Page, timeout_ms: int = 1500) -> None:
                 await asyncio.sleep(0.3)
         except Exception:
             continue
+
+    # Extra safety: remove blocking backdrop if present and inactive
+    try:
+        backdrop = page.locator(".modal-backdrop")
+        if await backdrop.is_visible(timeout=300):
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+    except Exception:
+        pass
 
 
 def _generate_bezier_points(
@@ -224,16 +248,27 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         start_y = box_handle["y"] + box_handle["height"] / 2.0
 
         if box_track:
-            end_x = (box_track["x"] + box_track["width"]) - (box_handle["width"] / 2.0) - random.uniform(1.0, 3.0)
+            # Full reach to right bumper: track_x + track_width - handle_width/2 + slight positive bumper push
+            end_x = (box_track["x"] + box_track["width"]) - (box_handle["width"] / 2.0) + random.uniform(2.0, 4.5)
         else:
-            # Fallback distance if track container width is not directly readable
-            distance = random.uniform(270.0, 290.0)
-            end_x = start_x + distance
+            # Try to measure parent container width dynamically
+            try:
+                p_width = await target_handle.evaluate(
+                    "el => el.parentElement ? el.parentElement.getBoundingClientRect().width : 0"
+                )
+                if p_width and p_width > box_handle["width"] * 1.5:
+                    end_x = box_handle["x"] + p_width - (box_handle["width"] / 2.0) + random.uniform(2.0, 4.0)
+                else:
+                    distance = random.uniform(310.0, 335.0)
+                    end_x = start_x + distance
+            except Exception:
+                distance = random.uniform(310.0, 335.0)
+                end_x = start_x + distance
 
         # Clamp end_x to viewport width
         vp = page.viewport_size or {"width": 1280, "height": 800}
-        end_x = min(end_x, vp["width"] - 20)
-        end_y = start_y + random.uniform(-1.5, 1.5)
+        end_x = min(end_x, vp["width"] - 8)
+        end_y = start_y + random.uniform(-1.0, 1.0)
 
         LOGGER.info(
             f"Slider drag plan: start=({start_x:.1f}, {start_y:.1f}) -> end=({end_x:.1f}, {end_y:.1f}) "
@@ -273,12 +308,15 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
                 else:
                     await asyncio.sleep(random.uniform(0.007, 0.016))
 
-        # 6. End-of-drag human hold before releasing mouse button
-        await asyncio.sleep(random.uniform(0.18, 0.28))
+        # 6. Lock-in phase: forward bumper touch ensuring hardware trigger registration
+        await page.mouse.move(end_x + random.uniform(1.0, 2.5), end_y)
+        await asyncio.sleep(random.uniform(0.06, 0.12))
+        await page.mouse.move(end_x, end_y)
+        await asyncio.sleep(random.uniform(0.14, 0.24))
 
         # 7. Release mouse button
         await page.mouse.up()
-        LOGGER.info("Completed slider drag motion. Awaiting DataDome validation...")
+        LOGGER.info("Completed slider drag motion with lock-in. Awaiting DataDome validation...")
 
         # 8. Verification loop: wait up to 3.5s for challenge to resolve
         for _ in range(7):

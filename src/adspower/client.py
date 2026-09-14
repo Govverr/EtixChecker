@@ -222,7 +222,16 @@ class AdsPowerClient:
         """Get list of active browser user_ids."""
         res = await self._request("GET", "/api/v1/browser/active")
         if res.get("code") == 0:
-            return res.get("data", {}).get("list", [])
+            items = res.get("data", {}).get("list", [])
+            active_ids = []
+            for item in items:
+                if isinstance(item, dict):
+                    uid = item.get("user_id") or item.get("id")
+                    if uid:
+                        active_ids.append(str(uid))
+                elif isinstance(item, (str, int)):
+                    active_ids.append(str(item))
+            return active_ids
         return []
 
     async def stop_all_active_browsers(self) -> int:

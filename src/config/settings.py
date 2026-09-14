@@ -77,16 +77,56 @@ def _env_range_ms(name: str, default: Tuple[int, int]) -> Tuple[int, int]:
     return lo, hi
 
 
-# Absolute minimum safe bounds for delays (including +20ms safety margin)
+# Absolute minimum safe bounds for delays (including +100ms safety margin)
 # Users / UI cannot configure values lower than these thresholds.
 MIN_SAFE_DELAYS: Dict[str, float] = {
-    "batch_nav_delay_ms": 270.0,         # Base min 250ms + 20ms buffer
-    "after_click_sleep_ms": 420.0,       # Base min 400ms + 20ms buffer (MUI state sync)
-    "add_sequential_delay_ms": 520.0,    # Base min 500ms + 20ms buffer (Human action gap)
-    "post_add_wait_ms": 1520.0,          # Base min 1500ms + 20ms buffer (Etix cart creation)
-    "delay_before_clear_carts_s": 2.2,   # Base min 2.0s + 0.2s buffer (Hold confirmation)
-    "clear_cart_stagger_ms": 320.0,      # Base min 300ms + 20ms buffer (Staggered clear)
+    "batch_nav_delay_ms": 350.0,         # Base min 250ms + 100ms safety buffer
+    "after_click_sleep_ms": 500.0,       # Base min 400ms + 100ms safety buffer (MUI state sync)
+    "add_sequential_delay_ms": 900.0,    # Base min 800ms + 100ms safety buffer (Human action gap)
+    "post_add_wait_ms": 1600.0,          # Base min 1500ms + 100ms safety buffer (Etix cart creation)
+    "delay_before_clear_carts_s": 2.2,   # Base min 2.0s + 0.2s safety buffer (Hold confirmation)
+    "clear_cart_stagger_ms": 400.0,      # Base min 300ms + 100ms safety buffer (Staggered clear)
+    "nav_timeout": 12000.0,              # Base min 10000ms + 2000ms safety buffer
 }
+
+
+def validate_and_clamp_delay(key: str, val: float) -> float:
+    """Clamp delay value to never fall below MIN_SAFE_DELAYS threshold."""
+    min_val = MIN_SAFE_DELAYS.get(key)
+    if min_val is not None and val < min_val:
+        return min_val
+    return val
+
+
+def save_delays_to_dotenv(updates: Dict[str, Any], path: Path = Path(".env")) -> None:
+    """Safely update delay settings in .env file while preserving existing keys and comments."""
+    lines: List[str] = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+    updated_keys = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            new_lines.append(line)
+            continue
+        key, _ = line.split("=", 1)
+        key = key.strip()
+        if key in updates:
+            new_lines.append(f"{key}={updates[key]}")
+            updated_keys.add(key)
+        else:
+            new_lines.append(line)
+
+    for key, val in updates.items():
+        if key not in updated_keys:
+            new_lines.append(f"{key}={val}")
+
+    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    # Also update current process os.environ
+    for k, v in updates.items():
+        os.environ[k] = str(v)
 
 
 @dataclass(frozen=True)
@@ -215,3 +255,11 @@ def estimate_check_duration_seconds(profiles_count: int, config: AppConfig) -> f
 
 
 CONFIG = AppConfig()
+
+
+def reload_config() -> AppConfig:
+    """Reload configuration from environment and return new AppConfig instance."""
+    global CONFIG
+    _load_dotenv()
+    CONFIG = AppConfig()
+    return CONFIG
