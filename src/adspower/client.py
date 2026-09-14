@@ -162,6 +162,11 @@ class AdsPowerClient:
         if not raw:
             return None
 
+        # Strip pipe metadata tags (e.g. |PVgzj) and comments
+        raw = raw.split("|")[0].split("#")[0].strip()
+        if not raw:
+            return None
+
         proxy_type = "http"
         if raw.startswith("socks5://"):
             proxy_type = "socks5"

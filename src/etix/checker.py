@@ -259,6 +259,12 @@ class EtixCheckEngine:
         # Step 1: Open show URL in primary worker (randomly chosen for uniform proxy distribution)
         primary_worker = random.choice(workers)
         try:
+            curr_prim_url = (primary_worker.page.url or "").lower()
+            if any(k in curr_prim_url for k in ["viewshoppingcart", "shoppingcart", "/cart"]):
+                try:
+                    await primary_worker.context.clear_cookies()
+                except Exception:
+                    pass
             await primary_worker.page.goto(
                 show.url,
                 wait_until="domcontentloaded",
@@ -659,14 +665,24 @@ class EtixCheckEngine:
                 target_path_lower = target_path.lower()
 
                 on_target = False
-                if perf_id and perf_id in curr_url:
-                    on_target = True
-                elif target_path_lower in curr_url:
-                    on_target = True
-                elif any(d in curr_url for d in ["etix.com", "cascadetickets.com", "catscradle"]) and not any(
-                    err in curr_url for err in ["about:blank", "chrome-error://", "chrome://", "start.adspower.net"]
-                ):
-                    on_target = True
+                # If currently on a cart page, clear cookies and force navigation
+                if any(k in curr_url for k in ["viewshoppingcart", "shoppingcart", "/cart", "checkout"]):
+                    LOGGER.info(
+                        f"[Worker #{current_worker.worker_index}] Currently in shopping cart, clearing cookies to start clean for {show.name}."
+                    )
+                    try:
+                        await current_worker.context.clear_cookies()
+                    except Exception:
+                        pass
+                    on_target = False
+                elif perf_id:
+                    # Strict match: performance ID must be present in current URL
+                    if f"/p/{perf_id}" in curr_url or f"/{perf_id}" in curr_url or perf_id in curr_url:
+                        on_target = True
+                elif target_path_lower:
+                    if target_path_lower in curr_url:
+                        on_target = True
+
 
                 needs_nav = (
                     not curr_url

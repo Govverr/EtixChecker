@@ -21,7 +21,7 @@ async def human_sleep(delay_range_ms: Tuple[int, int]) -> None:
 
 
 async def accept_cookies_if_present(page: Page, timeout_ms: int = 1500) -> None:
-    """Detect and click common cookie consent buttons."""
+    """Detect and click common cookie consent buttons, including Etix OK banner."""
     selectors = [
         "button#onetrust-accept-btn-handler",
         "button:has-text('Accept All Cookies')",
@@ -30,6 +30,14 @@ async def accept_cookies_if_present(page: Page, timeout_ms: int = 1500) -> None:
         "button:has-text('Allow All')",
         "button:has-text('Принять')",
         "button:has-text('Согласен')",
+        # Etix Cookie Consent Overlay
+        "div[class*='cookie'] button:has-text('OK')",
+        "div[class*='cookie'] button.btn-primary",
+        "div[class*='cookie'] button",
+        "#cookie-consent button",
+        ".cookie-banner button",
+        "button:text-is('OK')",
+        "button:has-text('OK')",
     ]
     for sel in selectors:
         try:

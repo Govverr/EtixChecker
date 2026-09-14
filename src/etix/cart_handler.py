@@ -7,7 +7,11 @@ import re
 from typing import List, Optional, Tuple
 from playwright.async_api import Page, Locator
 
-from src.browser.human_actions import human_sleep
+from src.browser.human_actions import (
+    accept_cookies_if_present,
+    close_blocking_popups,
+    human_sleep,
+)
 from src.config.settings import AppConfig
 from src.etix.detector import EtixDetector
 from src.utils.logger import LOGGER
@@ -180,19 +184,69 @@ class EtixCartHandler:
     ) -> Tuple[bool, int]:
         """Click Material-UI combobox, wait for popover menu, and select quantity option."""
         try:
-            await combo.scroll_into_view_if_needed(timeout=2000)
+            # Dismiss any cookie banner or modal overlay before opening dropdown
+            await accept_cookies_if_present(page, timeout_ms=400)
+            await close_blocking_popups(page, timeout_ms=400)
+
+            # Scroll combobox to center of view so popup has space
+            try:
+                await combo.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'center'})")
+            except Exception:
+                await combo.scroll_into_view_if_needed(timeout=2000)
+
             await combo.click()
             await human_sleep((300, 600))
 
-            # Wait for listbox options to appear
+            # Helper to click an option robustly
+            async def _click_opt_elem(opt_loc: Locator) -> bool:
+                try:
+                    await opt_loc.scroll_into_view_if_needed(timeout=1000)
+                except Exception:
+                    pass
+                try:
+                    await opt_loc.click(timeout=1500)
+                    return True
+                except Exception:
+                    try:
+                        await opt_loc.click(force=True, timeout=1500)
+                        return True
+                    except Exception:
+                        try:
+                            await opt_loc.evaluate("el => el.click()")
+                            return True
+                        except Exception:
+                            return False
+
+            # 1. Direct locator by data-value or exact text
+            direct_opt = page.locator(
+                f"li[role='option'][data-value='{requested_qty}'], "
+                f".MuiMenuItem-root[data-value='{requested_qty}'], "
+                f"li[role='option']:text-is('{requested_qty}')"
+            ).first
+            try:
+                if await direct_opt.is_visible(timeout=800):
+                    if await _click_opt_elem(direct_opt):
+                        await human_sleep((300, 500))
+                        return True, requested_qty
+            except Exception:
+                pass
+
+            # 2. Wait for listbox options to appear
             await page.wait_for_selector("li[role='option'], .MuiMenuItem-root", timeout=4000)
             options = page.locator("li[role='option'], .MuiMenuItem-root")
             count = await options.count()
             if count == 0:
-                return False, 0
+                # Try re-clicking combobox with force if list didn't open
+                try:
+                    await combo.click(force=True)
+                    await page.wait_for_selector("li[role='option'], .MuiMenuItem-root", timeout=2500)
+                    count = await options.count()
+                except Exception:
+                    pass
+                if count == 0:
+                    return False, 0
 
             # Find matching option
-            target_opt: Optional[Locator] = None
             opt_nums = []
             for i in range(count):
                 opt = options.nth(i)
@@ -205,19 +259,21 @@ class EtixCartHandler:
                 return False, 0
 
             # Find exact match or closest <= requested_qty
-            exact = next((opt for num, opt in opt_nums if num == requested_qty), None)
-            if exact:
-                await exact.click()
-                await human_sleep((300, 500))
-                return True, requested_qty
+            exact_entry = next(((num, opt) for num, opt in opt_nums if num == requested_qty), None)
+            if exact_entry:
+                if await _click_opt_elem(exact_entry[1]):
+                    await human_sleep((300, 500))
+                    return True, requested_qty
 
             # Pick largest available <= requested_qty or smallest available > requested_qty
             valid = [n for n, opt in opt_nums if n <= requested_qty and n > 0]
             chosen_num = max(valid) if valid else min(n for n, opt in opt_nums if n > 0)
             chosen_opt = next(opt for num, opt in opt_nums if num == chosen_num)
-            await chosen_opt.click()
-            await human_sleep((300, 500))
-            return True, chosen_num
+            if await _click_opt_elem(chosen_opt):
+                await human_sleep((300, 500))
+                return True, chosen_num
+
+            return False, 0
 
         except Exception as exc:
             LOGGER.error(f"Error selecting MUI quantity: {exc}")
@@ -226,13 +282,17 @@ class EtixCartHandler:
     async def _robust_select_quantity(self, sel: Locator, qty: int) -> Tuple[bool, int]:
         """Select quantity on standard select element."""
         try:
-            await sel.scroll_into_view_if_needed(timeout=2000)
+            await sel.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'center'})")
         except Exception:
-            pass
+            try:
+                await sel.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
 
         try:
             await sel.select_option(value=str(qty), timeout=2000)
             return True, qty
+
         except Exception:
             pass
 
@@ -335,6 +395,10 @@ class EtixCartHandler:
 
         await human_sleep(self.config.after_click_sleep_ms)
 
+        # Ensure cookie/disclaimer popups are dismissed before clicking Add Tickets
+        await accept_cookies_if_present(page, timeout_ms=300)
+        await close_blocking_popups(page, timeout_ms=300)
+
         # Find and click Add button
         add_btn = await self.find_add_button(page)
         if not add_btn:
@@ -344,10 +408,21 @@ class EtixCartHandler:
                 return False, 0, "Кнопка 'Add Tickets / Add to Cart' не найдена"
 
         try:
-            await add_btn.scroll_into_view_if_needed(timeout=2000)
+            try:
+                await add_btn.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'center'})")
+            except Exception:
+                await add_btn.scroll_into_view_if_needed(timeout=2000)
+
             await add_btn.click(timeout=self.config.click_timeout)
         except Exception as exc:
-            return False, 0, f"Ошибка клика 'Add Tickets': {exc}"
+            try:
+                await add_btn.click(force=True, timeout=2000)
+            except Exception:
+                try:
+                    await add_btn.evaluate("el => el.click()")
+                except Exception:
+                    return False, 0, f"Ошибка клика 'Add Tickets': {exc}"
+
 
         # Wait for navigation or cart confirmation
         await human_sleep((1500, 3000))
@@ -492,3 +567,11 @@ class EtixCartHandler:
                         await asyncio.sleep(0.3)
             except Exception:
                 continue
+
+        # 3. Always clear session cookies after cart release to ensure clean slate for subsequent shows
+        try:
+            await page.context.clear_cookies()
+            LOGGER.debug("Cleared session cookies after cart release.")
+        except Exception:
+            pass
+
