@@ -311,7 +311,21 @@ try {
 
     # Создание/обновление тихого лаунчера run_gui.vbs
     $vbsFile = Join-Path $scriptDir "run_gui.vbs"
-    $vbsContent = "Set shell = CreateObject(""WScript.Shell"")`r`nSet fso = CreateObject(""Scripting.FileSystemObject"")`r`nscriptDir = fso.GetParentFolderName(WScript.ScriptFullName)`r`npythonwExe = scriptDir & ""\venv\Scripts\pythonw.exe""`r`nguiScript = scriptDir & ""\gui_app.py""`r`n`r`nIf Not fso.FileExists(pythonwExe) Then`r`n    shell.Run """""""" & scriptDir & ""\run_gui.bat"""""""", 1, False`r`nElse`r`n    shell.CurrentDirectory = scriptDir`r`n    shell.Run """""""" & pythonwExe & """""" """""" & guiScript & """""""", 0, False`r`nEnd If`r`n"
+    $vbsContent = @'
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+pythonwExe = scriptDir & "\venv\Scripts\pythonw.exe"
+guiScript = scriptDir & "\gui_app.py"
+q = Chr(34)
+
+If Not fso.FileExists(pythonwExe) Then
+    shell.Run q & scriptDir & "\run_gui.bat" & q, 1, False
+Else
+    shell.CurrentDirectory = scriptDir
+    shell.Run q & pythonwExe & q & " " & q & guiScript & q, 0, False
+End If
+'@
     [System.IO.File]::WriteAllText($vbsFile, $vbsContent, [System.Text.Encoding]::ASCII)
 
     # --------------------------------------------------------------------------
@@ -319,32 +333,63 @@ try {
     # --------------------------------------------------------------------------
     Write-Host "[*] Создание ярлыка программы на Рабочем столе..." -ForegroundColor Cyan
     
-    # Надежное определение пути Рабочего стола через реестр Explorer (с поддержкой OneDrive и русской локализации)
-    $desktopPath = $null
+    $candidateDesktops = @()
+    # Реестр: текущий рабочий стол пользователя (в т.ч. OneDrive перенаправление)
     try {
-        $regDesktop = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -Name "Desktop" -ErrorAction SilentlyContinue).Desktop
-        if ($regDesktop) {
-            $desktopPath = [System.Environment]::ExpandEnvironmentVariables($regDesktop)
-        }
+        $reg = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -ErrorAction SilentlyContinue
+        if ($reg.Desktop) { $candidateDesktops += [System.Environment]::ExpandEnvironmentVariables($reg.Desktop) }
+        if ($reg.'{754AC886-DF64-4C36-86B5-AA80434A0373}') { $candidateDesktops += [System.Environment]::ExpandEnvironmentVariables($reg.'{754AC886-DF64-4C36-86B5-AA80434A0373}') }
     } catch {}
 
-    if (-not $desktopPath -or -not (Test-Path $desktopPath)) {
-        $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
-    }
+    # Стандартный рабочий стол пользователя
+    $candidateDesktops += [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
 
-    $shortcutPath = Join-Path $desktopPath "Etix Checker 2026.lnk"
+    # Пути OneDrive
+    if ($env:OneDrive) {
+        $candidateDesktops += Join-Path $env:OneDrive "Desktop"
+        $candidateDesktops += Join-Path $env:OneDrive "Рабочий стол"
+    }
+    if ($env:OneDriveConsumer) { $candidateDesktops += Join-Path $env:OneDriveConsumer "Desktop" }
+    if ($env:OneDriveCommercial) { $candidateDesktops += Join-Path $env:OneDriveCommercial "Desktop" }
+    $candidateDesktops += Join-Path $env:USERPROFILE "OneDrive\Desktop"
+    $candidateDesktops += Join-Path $env:USERPROFILE "OneDrive\Рабочий стол"
+
+    # Общий рабочий стол (для всех пользователей / запуск от имени Администратора)
+    $commonDesktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonDesktopDirectory)
+    if ($commonDesktop) { $candidateDesktops += $commonDesktop }
+
+    # Уникальные существующие каталоги
+    $targetDesktops = $candidateDesktops | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
     $iconPath = Join-Path $scriptDir "icons\etix_robot_round.ico"
+    $wscriptExe = Join-Path $env:SystemRoot "System32\wscript.exe"
+    if (-not (Test-Path $wscriptExe)) { $wscriptExe = "wscript.exe" }
 
     $ws = New-Object -ComObject WScript.Shell
-    $shortcut = $ws.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $vbsFile
-    $shortcut.WorkingDirectory = $scriptDir
-    if (Test-Path $iconPath) {
-        $shortcut.IconLocation = $iconPath
+    foreach ($d in $targetDesktops) {
+        try {
+            $shortcutPath = Join-Path $d "Etix Checker 2026.lnk"
+            $shortcut = $ws.CreateShortcut($shortcutPath)
+            # Запуск через wscript.exe исключает ассоциации с Блокнотом/редактором
+            $shortcut.TargetPath = $wscriptExe
+            $shortcut.Arguments = "`"$vbsFile`""
+            $shortcut.WorkingDirectory = $scriptDir
+            if (Test-Path $iconPath) {
+                $shortcut.IconLocation = $iconPath
+            }
+            $shortcut.Description = "Etix Checker 2026 -- AdsPower CDP Edition"
+            $shortcut.Save()
+            Write-Host "[+] Ярлык создан в: $d" -ForegroundColor Green
+        } catch {
+            Write-Host "[!] Предупреждение при создании ярлыка в $d : $_" -ForegroundColor Yellow
+        }
     }
-    $shortcut.Description = "Etix Checker 2026 -- AdsPower CDP Edition"
-    $shortcut.Save()
-    Write-Host "[+] Ярлык «Etix Checker 2026» создан на Рабочем столе ($desktopPath)!" -ForegroundColor Green
+
+    # Принудительное обновление оболочки Windows Explorer для мгновенного отображения ярлыка
+    try {
+        $shType = Add-Type -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int wEventId, int uFlags, IntPtr dwItem1, IntPtr dwItem2);' -Name "Win32SHChangeNotify" -Namespace "Win32Utils" -PassThru
+        $shType::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+    } catch {}
     Write-Host ""
 
     # --------------------------------------------------------------------------
