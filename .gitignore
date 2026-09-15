@@ -39,6 +39,18 @@ data/*.json
 data/proxy_state/
 data/adspower_backup/
 
+# Developer documentation & agent instructions (local dev only)
+AGENTS.md
+ERRORS.md
+PROJECT_CONTEXT.md
+
+# Developer release utilities & CLI (local dev only)
+pack_release.bat
+pack_release.py
+run.bat
+cli.py
+run_gui_silent.vbs
+
 # Developer tests and scratch tools (kept on local dev machine only)
 tests/
 scratch/

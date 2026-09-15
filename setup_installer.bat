@@ -309,13 +309,10 @@ try {
         New-Item -ItemType File -Path $blockedProfilesFile -Force | Out-Null
     }
 
-    # Создание/обновление тихих лаунчеров (run_gui_silent.vbs и run_gui.vbs)
-    $vbsSilentFile = Join-Path $scriptDir "run_gui_silent.vbs"
+    # Создание/обновление тихого лаунчера run_gui.vbs
+    $vbsFile = Join-Path $scriptDir "run_gui.vbs"
     $vbsContent = "Set shell = CreateObject(""WScript.Shell"")`r`nSet fso = CreateObject(""Scripting.FileSystemObject"")`r`nscriptDir = fso.GetParentFolderName(WScript.ScriptFullName)`r`npythonwExe = scriptDir & ""\venv\Scripts\pythonw.exe""`r`nguiScript = scriptDir & ""\gui_app.py""`r`n`r`nIf Not fso.FileExists(pythonwExe) Then`r`n    shell.Run """""""" & scriptDir & ""\run_gui.bat"""""""", 1, False`r`nElse`r`n    shell.CurrentDirectory = scriptDir`r`n    shell.Run """""""" & pythonwExe & """""" """""" & guiScript & """""""", 0, False`r`nEnd If`r`n"
-    [System.IO.File]::WriteAllText($vbsSilentFile, $vbsContent, [System.Text.Encoding]::ASCII)
-
-    $vbsStandardFile = Join-Path $scriptDir "run_gui.vbs"
-    [System.IO.File]::WriteAllText($vbsStandardFile, $vbsContent, [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText($vbsFile, $vbsContent, [System.Text.Encoding]::ASCII)
 
     # --------------------------------------------------------------------------
     # 6. Создание ярлыка на Рабочем столе
@@ -340,7 +337,7 @@ try {
 
     $ws = New-Object -ComObject WScript.Shell
     $shortcut = $ws.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $vbsSilentFile
+    $shortcut.TargetPath = $vbsFile
     $shortcut.WorkingDirectory = $scriptDir
     if (Test-Path $iconPath) {
         $shortcut.IconLocation = $iconPath
@@ -374,15 +371,15 @@ try {
     Write-Host ""
     Write-Host "Для запуска программы используйте:" -ForegroundColor Cyan
     Write-Host "  1. Ярлык на Рабочем столе: «Etix Checker 2026» (чистый запуск без черной консоли)" -ForegroundColor White
-    Write-Host "  2. Файл запуска GUI с видимой консолью: run_gui.bat" -ForegroundColor White
-    Write-Host "  3. Файл запуска консольного режима (CLI): run.bat" -ForegroundColor White
+    Write-Host "  2. Файл чистого запуска без консоли: run_gui.vbs" -ForegroundColor White
+    Write-Host "  3. Файл запуска GUI с видимой консолью (для проверки): run_gui.bat" -ForegroundColor White
     Write-Host ""
     Write-Host "Подробная документация пользователя: файл ИНСТРУКЦИЯ.md в папке проекта." -ForegroundColor Gray
     Write-Host ""
 
     $choice = Read-Host "Запустить графический интерфейс прямо сейчас? (Y/N, Enter = Y)"
     if ([string]::IsNullOrWhiteSpace($choice) -or $choice.Trim().ToUpper() -eq "Y") {
-        Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsSilentFile`""
+        Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsFile`""
     }
 
 } catch {
