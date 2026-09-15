@@ -1,11 +1,11 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 title Etix Checker 2026 - One-Click Installer
 color 0b
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$f = '%~f0'; $lines = [System.IO.File]::ReadAllLines($f, [System.Text.Encoding]::UTF8); $idx = 0; while ($idx -lt $lines.Count -and $lines[$idx] -notmatch '^\s*###PS_START###\s*$') { $idx++ }; if ($idx -lt $lines.Count) { $script = ($lines[($idx+1)..($lines.Count-1)] -join [Environment]::NewLine); & ([ScriptBlock]::Create($script)) }"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$scriptPath = '%~f0'; $scriptDir = '%~dp0'.TrimEnd('\'); $lines = [System.IO.File]::ReadAllLines($scriptPath, [System.Text.Encoding]::UTF8); $idx = 0; while ($idx -lt $lines.Count -and $lines[$idx] -notmatch '^\s*###PS_START###\s*$') { $idx++ }; if ($idx -lt $lines.Count) { $script = ($lines[($idx+1)..($lines.Count-1)] -join [Environment]::NewLine); & ([ScriptBlock]::Create($script)) }"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.
@@ -31,7 +31,7 @@ Write-Host "====================================================================
 Write-Host ""
 
 try {
-    $scriptDir = (Get-Location).Path
+    if (-not $scriptDir -or -not (Test-Path $scriptDir)) { $scriptDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($scriptPath)) }
     Set-Location $scriptDir
 
     # --------------------------------------------------------------------------
