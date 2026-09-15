@@ -64,3 +64,7 @@ implementation_plan.md.resolved
 
 # Release builds
 release/
+
+# Next chat instructions & prompts
+NEXT_CHAT_PROMPT.md
+PROMPT_*.md
