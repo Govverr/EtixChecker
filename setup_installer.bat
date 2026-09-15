@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
@@ -254,8 +254,10 @@ try {
             & "$venvPip" install -r "$reqFile"
         }
     } else {
-        & "$venvPip" install playwright pandas customtkinter rich textual httpx python-dotenv pillow -q
+        & "$venvPip" install playwright "greenlet==3.1.1" pandas customtkinter rich textual httpx python-dotenv pillow -q
     }
+    # Гарантируем проверенную версию greenlet для совместимости с политиками безопасности Windows (Smart App Control)
+    & "$venvPip" install "greenlet==3.1.1" -q 2>$null
     Write-Host "[+] Все библиотеки успешно установлены." -ForegroundColor Green
 
     Write-Host "[*] Проверка и подготовка внутреннего движка Playwright Chromium..." -ForegroundColor Cyan
