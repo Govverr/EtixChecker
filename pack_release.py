@@ -16,6 +16,7 @@ def create_release_zip():
         "setup_installer.bat",
         "run_gui.bat",
         "run_gui.vbs",
+        "run_gui_silent.vbs",
         "run.bat",
         "gui_app.py",
         "cli.py",
@@ -32,9 +33,8 @@ def create_release_zip():
 
     # Specific data files for clean template
     data_files = [
-        "data/shows.csv",
-        "data/good_proxies.txt",
-        "data/bad_proxies.txt",
+        "data/shows.csv.example",
+        "data/good_proxies.txt.example",
         "data/warmup_sites.txt",
         "data/human.yml",
     ]
@@ -43,6 +43,8 @@ def create_release_zip():
         "__pycache__",
         ".pyc",
         ".git",
+        "tests",
+        "scratch",
         "venv",
         "ms-playwright",
         "runs",

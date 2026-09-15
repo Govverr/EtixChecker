@@ -11,6 +11,38 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+
+def _handle_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    import traceback
+    from datetime import datetime
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+
+    crash_log = Path("logs") / "gui_crash.log"
+    try:
+        crash_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(crash_log, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] UNCAUGHT GUI EXCEPTION:\n{tb_str}\n")
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"Произошла непредвиденная ошибка в работе Etix Checker:\n\n{exc_value}\n\nПодробный отчет записан в:\n{crash_log.resolve()}",
+            "Etix Checker 2026 — Ошибка GUI",
+            0x10 | 0x0,  # MB_ICONERROR | MB_OK
+        )
+    except Exception:
+        pass
+
+
+sys.excepthook = _handle_uncaught_exception
+
 import customtkinter as ctk
 import pandas as pd
 from tkinter import messagebox

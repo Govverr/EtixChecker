@@ -36,6 +36,8 @@ PROTECTED_PATHS: Set[str] = {
     "venv",
     "ms-playwright",
     ".git",
+    "tests",
+    "scratch",
 }
 
 

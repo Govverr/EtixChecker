@@ -9,6 +9,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.pytest_cache/
 
 # Environment variables & secrets
 .env
@@ -27,8 +28,20 @@ screens/
 logs/
 *.log
 report.csv
+
+# User data & runtime state (NEVER COMMIT)
+data/*.csv
+!data/shows.csv.example
+data/good_proxies.txt
+data/bad_proxies.txt
+data/blocked_profiles.txt
+data/*.json
 data/proxy_state/
 data/adspower_backup/
+
+# Developer tests and scratch tools (kept on local dev machine only)
+tests/
+scratch/
 
 # System / IDE / Temp files
 .DS_Store
@@ -36,6 +49,6 @@ Thumbs.db
 .idea/
 .vscode/
 implementation_plan.md.resolved
-PROJECT_CONTEXT.md
 
+# Release builds
 release/

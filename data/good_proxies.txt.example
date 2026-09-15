@@ -1,0 +1,7 @@
+# Пример формата прокси (по одному на строку):
+# ip:port:username:password
+# http://username:password@ip:port
+# socks5://username:password@ip:port
+#
+192.168.1.100:8080:user123:pass456
+http://res_user:res_pass@proxy.provider.com:3128

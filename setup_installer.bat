@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 title Etix Checker 2026 - One-Click Installer
@@ -50,13 +51,13 @@ try {
         # Проверяем, содержит ли папка файлы репозитория
         $repoReady = (Test-Path (Join-Path $scriptDir "gui_app.py"))
         if (-not $repoReady) {
-            Write-Host "[*] Загрузка файлов проекта с GitHub..." -ForegroundColor Cyan
+            Write-Host "[*] Загрузка актуальных файлов проекта с GitHub..." -ForegroundColor Cyan
             $downloadSuccess = $false
 
-            # Попытка через Git
+            # Попытка через Git (если установлен)
             $gitExists = Get-Command "git" -ErrorAction SilentlyContinue
             if ($gitExists) {
-                Write-Host "[*] Попытка клонирования через Git..." -ForegroundColor Gray
+                Write-Host "[*] Клонирование репозитория через Git..." -ForegroundColor Gray
                 try {
                     & git clone https://github.com/Govverr/EtixChecker.git . 2>$null
                     if (Test-Path (Join-Path $scriptDir "gui_app.py")) {
@@ -65,20 +66,20 @@ try {
                 } catch {}
             }
 
-            # Попытка через ZIP
+            # Попытка через ZIP-архив (основной надежный канал)
             if (-not $downloadSuccess) {
-                Write-Host "[*] Загрузка архива проекта..." -ForegroundColor Gray
-                $zipPath = Join-Path $env:TEMP "repo_$RANDOM.zip"
-                $tempExtract = Join-Path $env:TEMP "extract_$RANDOM"
+                Write-Host "[*] Загрузка ZIP-архива репозитория..." -ForegroundColor Gray
+                $zipPath = Join-Path $env:TEMP "etix_repo_$RANDOM.zip"
+                $tempExtract = Join-Path $env:TEMP "etix_extract_$RANDOM"
                 
                 $wc = New-Object System.Net.WebClient
-                $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) EtixInstaller/2026")
                 
                 try {
                     $downloadUrl = "https://github.com/Govverr/EtixChecker/archive/refs/heads/main.zip"
                     $wc.DownloadFile($downloadUrl, $zipPath)
                     Expand-Archive -Path $zipPath -DestinationPath $tempExtract -Force
-                    $extractedSub = Get-ChildItem -Path $tempExtract | Select-Object -First 1
+                    $extractedSub = Get-ChildItem -Path $tempExtract | Where-Object { $_.PSIsContainer } | Select-Object -First 1
                     if ($extractedSub) {
                         Copy-Item -Path "$($extractedSub.FullName)\*" -Destination $scriptDir -Recurse -Force
                     }
@@ -86,25 +87,19 @@ try {
                     if (Test-Path (Join-Path $scriptDir "gui_app.py")) {
                         $downloadSuccess = $true
                     }
-                } catch {}
+                } catch {
+                    Write-Host "[!] Ошибка при скачивании архива: $_" -ForegroundColor Yellow
+                }
             }
 
             if (-not $downloadSuccess) {
                 Write-Host ""
-                Write-Host "==============================================================================" -ForegroundColor Yellow
-                Write-Host "⚠️  ВНИМАНИЕ: РЕПОЗИТОРИЙ GITHUB ЯВЛЯЕТСЯ ПРИВАТНЫМ" -ForegroundColor Yellow
-                Write-Host "==============================================================================" -ForegroundColor Yellow
-                Write-Host ""
-                Write-Host "Файлы проекта не могут быть скачаны анонимно без авторизации в GitHub." -ForegroundColor White
-                Write-Host ""
-                Write-Host "КАК УСТАНОВИТЬ ПРОГРАММУ КЛИЕНТУ:" -ForegroundColor Cyan
-                Write-Host "  1. Передайте клиенту архив с файлами проекта (например, EtixChecker.zip)." -ForegroundColor White
-                Write-Host "  2. Клиент распаковывает архив в любую папку." -ForegroundColor White
-                Write-Host "  3. Запускает файл setup_installer.bat ВНУТРИ распакованной папки." -ForegroundColor White
-                Write-Host ""
-                Write-Host "Установщик автоматически настроит Python, зависимости и ярлык на Рабочем столе!" -ForegroundColor Green
-                Write-Host ""
-                throw "Файлы проекта не найдены. Пожалуйста, запустите setup_installer.bat внутри папки с распакованным проектом."
+                Write-Host "==============================================================================" -ForegroundColor Red
+                Write-Host "❌ НЕ УДАЛОСЬ ЗАГРУЗИТЬ ФАЙЛЫ ПРОЕКТА" -ForegroundColor Red
+                Write-Host "==============================================================================" -ForegroundColor Red
+                Write-Host "Пожалуйста, убедитесь в наличии подключения к Интернету либо распакуйте" -ForegroundColor White
+                Write-Host "архив с программой вручную и запустите setup_installer.bat внутри папки проекта." -ForegroundColor White
+                throw "Файлы проекта не найдены."
             }
         }
     }
@@ -183,13 +178,14 @@ try {
         $wc.DownloadFile($pyUrl, $pyInstallerPath)
         
         if (Test-Path $pyInstallerPath) {
-            Write-Host "[*] Установка Python 3.11 (тихий режим, добавление в PATH)..." -ForegroundColor Cyan
-            $p = Start-Process -FilePath $pyInstallerPath -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0 Include_pip=1 SimpleInstall=1" -Wait -PassThru
+            Write-Host "[*] Установка Python 3.11 (тихий режим в область пользователя, без UAC)..." -ForegroundColor Cyan
+            # Флаг Include_launcher=0 критически важен для исключения ошибки 0x80070032: Failed to elevate
+            $p = Start-Process -FilePath $pyInstallerPath -ArgumentList "/quiet InstallAllUsers=0 Include_launcher=0 PrependPath=1 Include_test=0 Include_pip=1 SimpleInstall=1" -Wait -PassThru
             Remove-Item -Path $pyInstallerPath -Force -ErrorAction SilentlyContinue
             
             $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
             $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
-            $env:Path = "$env:LOCALAPPDATA\Programs\Python\Python311;$env:LOCALAPPDATA\Programs\Python\Python311\Scripts;$userPath;$machinePath"
+            $env:Path = "$env:LOCALAPPDATA\Programs\Python\Python311;$env:LOCALAPPDATA\Programs\Python\Python311\Scripts;$env:Path"
             
             $pyDirect = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
             if (Test-Path $pyDirect) {
@@ -198,7 +194,7 @@ try {
                 $pythonExe = "python"
             }
         } else {
-            throw "Не удалось скачать установщик Python. Установите Python 3.10+ вручную с https://www.python.org/"
+            throw "Не удалось скачать установщик Python. Пожалуйста, установите Python 3.10+ вручную с https://www.python.org/"
         }
     }
 
@@ -210,6 +206,7 @@ try {
     # --------------------------------------------------------------------------
     $venvDir = Join-Path $scriptDir "venv"
     $venvPy = Join-Path $venvDir "Scripts\python.exe"
+    $venvPyw = Join-Path $venvDir "Scripts\pythonw.exe"
     $venvPip = Join-Path $venvDir "Scripts\pip.exe"
 
     if (-not (Test-Path $venvPy)) {
@@ -229,22 +226,22 @@ try {
     # --------------------------------------------------------------------------
     # 4. Установка зависимостей и браузера Playwright Chromium
     # --------------------------------------------------------------------------
-    Write-Host "[*] Обновление pip и установка библиотек..." -ForegroundColor Cyan
+    Write-Host "[*] Обновление pip и установка библиотек проекта..." -ForegroundColor Cyan
     & "$venvPy" -m pip install --upgrade pip -q 2>$null
 
     $reqFile = Join-Path $scriptDir "requirements.txt"
     if (Test-Path $reqFile) {
         & "$venvPip" install -r "$reqFile" -q
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "[!] Повторная попытка установки библиотек..." -ForegroundColor Yellow
+            Write-Host "[!] Повторная попытка установки библиотек с подробным выводом..." -ForegroundColor Yellow
             & "$venvPip" install -r "$reqFile"
         }
     } else {
-        & "$venvPip" install playwright pandas customtkinter rich textual httpx python-dotenv -q
+        & "$venvPip" install playwright pandas customtkinter rich textual httpx python-dotenv pillow -q
     }
     Write-Host "[+] Все библиотеки успешно установлены." -ForegroundColor Green
 
-    Write-Host "[*] Проверка и установка браузера Playwright Chromium..." -ForegroundColor Cyan
+    Write-Host "[*] Проверка и подготовка внутреннего движка Playwright Chromium..." -ForegroundColor Cyan
     $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $scriptDir "ms-playwright"
     if (-not (Test-Path $env:PLAYWRIGHT_BROWSERS_PATH)) {
         New-Item -ItemType Directory -Path $env:PLAYWRIGHT_BROWSERS_PATH -Force | Out-Null
@@ -254,9 +251,9 @@ try {
     Write-Host ""
 
     # --------------------------------------------------------------------------
-    # 5. Инициализация конфигурационных файлов
+    # 5. Инициализация каталогов и конфигурационных файлов
     # --------------------------------------------------------------------------
-    Write-Host "[*] Проверка структуры папок и конфигурации..." -ForegroundColor Cyan
+    Write-Host "[*] Проверка структуры каталогов и начальной конфигурации..." -ForegroundColor Cyan
     @("data", "data\adspower_backup", "logs", "screens", "runs") | ForEach-Object {
         $folderPath = Join-Path $scriptDir $_
         if (-not (Test-Path $folderPath)) {
@@ -264,6 +261,7 @@ try {
         }
     }
 
+    # Инициализация .env
     $envFile = Join-Path $scriptDir ".env"
     $envExample = Join-Path $scriptDir ".env.example"
     if (-not (Test-Path $envFile)) {
@@ -273,40 +271,83 @@ try {
             $envText = "ADSPOWER_API_URL=http://127.0.0.1:50325`nADSPOWER_GROUP_NAME=Inventory Etix (DO NOT TOUCH)`nADSPOWER_ACTIVE_PROFILES_COUNT=12`nETIX_HEADLESS=false`nETIX_SLOWMO_MS=80`nETIX_NAV_TIMEOUT=18000`nETIX_CLICK_TIMEOUT=20000`nETIX_DELAY_BEFORE_CLEAR_CARTS_S=4.0`nETIX_STRICT_ALL_CARTS=true"
             $envText | Out-File -FilePath $envFile -Encoding utf8
         }
-        Write-Host "[+] Создан файл конфигурации .env" -ForegroundColor Green
+        Write-Host "[+] Создан рабочий файл конфигурации .env" -ForegroundColor Green
     }
 
+    # Инициализация data/shows.csv
     $showsFile = Join-Path $scriptDir "data\shows.csv"
+    $showsExample = Join-Path $scriptDir "data\shows.csv.example"
     if (-not (Test-Path $showsFile)) {
-        $showsText = "name,url,target_total,max_per_order,ticket_index`nNateSmith,https://www.etix.com/ticket/p/35196855/nate-smith-palmer-alaska-state-fair,12,4,2`nGasolina Party,https://www.etix.com/ticket/p/87677793/gasolina-party-providence-the-strand-theatre?partner_id=100,24,6,2"
-        $showsText | Out-File -FilePath $showsFile -Encoding utf8
-        Write-Host "[+] Создан файл примеров data\shows.csv" -ForegroundColor Green
+        if (Test-Path $showsExample) {
+            Copy-Item -Path $showsExample -Destination $showsFile -Force
+        } else {
+            $showsText = "name,url,target_total,max_per_order,ticket_index`nNateSmith,https://www.etix.com/ticket/p/35196855/nate-smith-palmer-alaska-state-fair,12,4,2`nGasolina Party,https://www.etix.com/ticket/p/87677793/gasolina-party-providence-the-strand-theatre?partner_id=100,24,6,2"
+            $showsText | Out-File -FilePath $showsFile -Encoding utf8
+        }
+        Write-Host "[+] Создан файл событий data\shows.csv" -ForegroundColor Green
     }
 
-    $vbsFile = Join-Path $scriptDir "run_gui.vbs"
-    if (-not (Test-Path $vbsFile)) {
-        $vbsText = "Set shell = CreateObject(`"WScript.Shell`")`nSet fso = CreateObject(`"Scripting.FileSystemObject`")`nscriptDir = fso.GetParentFolderName(WScript.ScriptFullName)`ncmd = `"cmd /c `"`"`" & scriptDir & `"un_gui.bat`"`"`" --no-pause`"`nshell.Run cmd, 0, False"
-        $vbsText | Out-File -FilePath $vbsFile -Encoding ascii
+    # Инициализация data/good_proxies.txt
+    $goodProxiesFile = Join-Path $scriptDir "data\good_proxies.txt"
+    $goodProxiesExample = Join-Path $scriptDir "data\good_proxies.txt.example"
+    if (-not (Test-Path $goodProxiesFile)) {
+        if (Test-Path $goodProxiesExample) {
+            Copy-Item -Path $goodProxiesExample -Destination $goodProxiesFile -Force
+        } else {
+            New-Item -ItemType File -Path $goodProxiesFile -Force | Out-Null
+        }
+        Write-Host "[+] Создан файл базы прокси data\good_proxies.txt" -ForegroundColor Green
     }
+
+    # Инициализация файлов bad_proxies.txt и blocked_profiles.txt
+    $badProxiesFile = Join-Path $scriptDir "data\bad_proxies.txt"
+    if (-not (Test-Path $badProxiesFile)) {
+        New-Item -ItemType File -Path $badProxiesFile -Force | Out-Null
+    }
+    $blockedProfilesFile = Join-Path $scriptDir "data\blocked_profiles.txt"
+    if (-not (Test-Path $blockedProfilesFile)) {
+        New-Item -ItemType File -Path $blockedProfilesFile -Force | Out-Null
+    }
+
+    # Создание/обновление тихих лаунчеров (run_gui_silent.vbs и run_gui.vbs)
+    $vbsSilentFile = Join-Path $scriptDir "run_gui_silent.vbs"
+    $vbsContent = "Set shell = CreateObject(""WScript.Shell"")`r`nSet fso = CreateObject(""Scripting.FileSystemObject"")`r`nscriptDir = fso.GetParentFolderName(WScript.ScriptFullName)`r`npythonwExe = scriptDir & ""\venv\Scripts\pythonw.exe""`r`nguiScript = scriptDir & ""\gui_app.py""`r`n`r`nIf Not fso.FileExists(pythonwExe) Then`r`n    shell.Run """""""" & scriptDir & ""\run_gui.bat"""""""", 1, False`r`nElse`r`n    shell.CurrentDirectory = scriptDir`r`n    shell.Run """""""" & pythonwExe & """""" """""" & guiScript & """""""", 0, False`r`nEnd If`r`n"
+    [System.IO.File]::WriteAllText($vbsSilentFile, $vbsContent, [System.Text.Encoding]::ASCII)
+
+    $vbsStandardFile = Join-Path $scriptDir "run_gui.vbs"
+    [System.IO.File]::WriteAllText($vbsStandardFile, $vbsContent, [System.Text.Encoding]::ASCII)
 
     # --------------------------------------------------------------------------
     # 6. Создание ярлыка на Рабочем столе
     # --------------------------------------------------------------------------
-    Write-Host "[*] Создание ярлыка на Рабочем столе..." -ForegroundColor Cyan
-    $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+    Write-Host "[*] Создание ярлыка программы на Рабочем столе..." -ForegroundColor Cyan
+    
+    # Надежное определение пути Рабочего стола через реестр Explorer (с поддержкой OneDrive и русской локализации)
+    $desktopPath = $null
+    try {
+        $regDesktop = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -Name "Desktop" -ErrorAction SilentlyContinue).Desktop
+        if ($regDesktop) {
+            $desktopPath = [System.Environment]::ExpandEnvironmentVariables($regDesktop)
+        }
+    } catch {}
+
+    if (-not $desktopPath -or -not (Test-Path $desktopPath)) {
+        $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+    }
+
     $shortcutPath = Join-Path $desktopPath "Etix Checker 2026.lnk"
     $iconPath = Join-Path $scriptDir "icons\etix_robot_round.ico"
 
     $ws = New-Object -ComObject WScript.Shell
     $shortcut = $ws.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $vbsFile
+    $shortcut.TargetPath = $vbsSilentFile
     $shortcut.WorkingDirectory = $scriptDir
     if (Test-Path $iconPath) {
         $shortcut.IconLocation = $iconPath
     }
     $shortcut.Description = "Etix Checker 2026 -- AdsPower CDP Edition"
     $shortcut.Save()
-    Write-Host "[+] Ярлык «Etix Checker 2026» создан на рабочем столе!" -ForegroundColor Green
+    Write-Host "[+] Ярлык «Etix Checker 2026» создан на Рабочем столе ($desktopPath)!" -ForegroundColor Green
     Write-Host ""
 
     # --------------------------------------------------------------------------
@@ -332,16 +373,16 @@ try {
     Write-Host "==============================================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Для запуска программы используйте:" -ForegroundColor Cyan
-    Write-Host "  1. Ярлык на Рабочем столе: «Etix Checker 2026» (чистый запуск без консоли)" -ForegroundColor White
-    Write-Host "  2. Файл запуска GUI: run_gui.bat" -ForegroundColor White
-    Write-Host "  3. Файл запуска консоли (CLI): run.bat" -ForegroundColor White
+    Write-Host "  1. Ярлык на Рабочем столе: «Etix Checker 2026» (чистый запуск без черной консоли)" -ForegroundColor White
+    Write-Host "  2. Файл запуска GUI с видимой консолью: run_gui.bat" -ForegroundColor White
+    Write-Host "  3. Файл запуска консольного режима (CLI): run.bat" -ForegroundColor White
     Write-Host ""
-    Write-Host "Подробное руководство пользователя: файл ИНСТРУКЦИЯ.md в папке проекта." -ForegroundColor Gray
+    Write-Host "Подробная документация пользователя: файл ИНСТРУКЦИЯ.md в папке проекта." -ForegroundColor Gray
     Write-Host ""
 
     $choice = Read-Host "Запустить графический интерфейс прямо сейчас? (Y/N, Enter = Y)"
     if ([string]::IsNullOrWhiteSpace($choice) -or $choice.Trim().ToUpper() -eq "Y") {
-        Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsFile`""
+        Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsSilentFile`""
     }
 
 } catch {
