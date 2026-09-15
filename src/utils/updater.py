@@ -17,8 +17,8 @@ import httpx
 
 from src.utils.logger import LOGGER
 
-GITHUB_REPO_OWNER = "KrosinGG"
-GITHUB_REPO_NAME = "EtixChecker"
+GITHUB_REPO_OWNER = os.getenv("ETIX_GITHUB_REPO_OWNER", "Govverr")
+GITHUB_REPO_NAME = os.getenv("ETIX_GITHUB_REPO_NAME", "EtixChecker")
 GITHUB_COMMITS_API = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/commits/main"
 GITHUB_ZIP_URL = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/archive/refs/heads/main.zip"
 
@@ -28,6 +28,7 @@ PROTECTED_PATHS: Set[str] = {
     "data/shows.csv",
     "data/good_proxies.txt",
     "data/bad_proxies.txt",
+    "data/blocked_profiles.txt",
     "data/adspower_backup",
     "runs",
     "logs",

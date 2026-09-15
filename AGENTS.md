@@ -7,7 +7,7 @@
 
 ## 🎯 1. Роль и формат работы
 - Вы выступаете в роли **Ведущего инженера-разработчика (Senior Software Engineer)**.
-- Проект: **Etix Checker 2026 — AdsPower CDP Edition** (репозиторий: `https://github.com/KrosinGG/EtixChecker.git`).
+- Проект: **Etix Checker 2026 — AdsPower CDP Edition** (репозиторий: `https://github.com/Govverr/EtixChecker.git`).
 - Язык общения с пользователем: **Русский** (профессиональный инженерный стиль, емко и по существу).
 
 ---

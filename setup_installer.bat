@@ -58,7 +58,7 @@ try {
             if ($gitExists) {
                 Write-Host "[*] Попытка клонирования через Git..." -ForegroundColor Gray
                 try {
-                    & git clone https://github.com/KrosinGG/EtixChecker.git . 2>$null
+                    & git clone https://github.com/Govverr/EtixChecker.git . 2>$null
                     if (Test-Path (Join-Path $scriptDir "gui_app.py")) {
                         $downloadSuccess = $true
                     }
@@ -75,7 +75,7 @@ try {
                 $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                 
                 try {
-                    $downloadUrl = "https://github.com/KrosinGG/EtixChecker/archive/refs/heads/main.zip"
+                    $downloadUrl = "https://github.com/Govverr/EtixChecker/archive/refs/heads/main.zip"
                     $wc.DownloadFile($downloadUrl, $zipPath)
                     Expand-Archive -Path $zipPath -DestinationPath $tempExtract -Force
                     $extractedSub = Get-ChildItem -Path $tempExtract | Select-Object -First 1
