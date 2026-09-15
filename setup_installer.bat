@@ -34,6 +34,23 @@ try {
     if (-not $scriptDir -or -not (Test-Path $scriptDir)) { $scriptDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($scriptPath)) }
     Set-Location $scriptDir
 
+    # Определение активного пользователя сеанса Windows
+    $interactiveUser = $null
+    try {
+        $csUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+        if ($csUser) { $interactiveUser = $csUser.Split('\')[-1] }
+    } catch {}
+    $currentProcessUser = [System.Environment]::UserName
+
+    Write-Host "[*] Профиль пользователя Windows: $currentProcessUser" -ForegroundColor Green
+    if ($interactiveUser -and $interactiveUser -ne $currentProcessUser) {
+        Write-Host "[!] Запуск выполнен от '$currentProcessUser' в активном сеансе '$interactiveUser'." -ForegroundColor Yellow
+        Write-Host "    Ярлык будет также размещен на рабочем столе '$interactiveUser'." -ForegroundColor Cyan
+    } else {
+        Write-Host "    (Все компоненты и ярлык устанавливаются изолированно в этот профиль)" -ForegroundColor Gray
+    }
+    Write-Host ""
+
     # --------------------------------------------------------------------------
     # 1. Определение целевой рабочей папки и исходных файлов
     # --------------------------------------------------------------------------
@@ -354,11 +371,17 @@ End If
     $candidateDesktops += Join-Path $env:USERPROFILE "OneDrive\Desktop"
     $candidateDesktops += Join-Path $env:USERPROFILE "OneDrive\Рабочий стол"
 
-    # Общий рабочий стол (для всех пользователей / запуск от имени Администратора)
-    $commonDesktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonDesktopDirectory)
-    if ($commonDesktop) { $candidateDesktops += $commonDesktop }
+    # Если запуск был от имени Администратора другого аккаунта, добавляем рабочий стол активного сеанса
+    if ($interactiveUser -and $interactiveUser -ne $currentProcessUser) {
+        $interactiveUserDir = Join-Path "C:\Users" $interactiveUser
+        if (Test-Path $interactiveUserDir) {
+            $candidateDesktops += Join-Path $interactiveUserDir "Desktop"
+            $candidateDesktops += Join-Path $interactiveUserDir "OneDrive\Desktop"
+            $candidateDesktops += Join-Path $interactiveUserDir "OneDrive\Рабочий стол"
+        }
+    }
 
-    # Уникальные существующие каталоги
+    # ИСКЛЮЧАЕМ C:\Users\Public\Desktop, чтобы ярлык создавался строго в рабочем профиле, а не в основном личном!
     $targetDesktops = $candidateDesktops | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 
     $iconPath = Join-Path $scriptDir "icons\etix_robot_round.ico"
