@@ -38,6 +38,53 @@ class EtixDetector:
         ]
         return any(p in err_msg for p in bad_patterns)
 
+    async def is_adspower_proxy_failure(self, page: Page) -> tuple[bool, str]:
+        """Check if AdsPower start page or browser tab displays proxy failure or network error."""
+        try:
+            url = (page.url or "").lower()
+            if "chrome-error://" in url or "about:error" in url:
+                return True, "Chrome network error URL"
+
+            body_text = await page.inner_text("body", timeout=1000)
+            body_lower = body_text.lower()
+
+            failure_phrases = [
+                "proxy failure",
+                "didn't passed the ip checker",
+                "didn't pass the ip checker",
+                "meets the proxy service provider's conditions",
+                "err_proxy_connection_failed",
+                "err_connection_timed_out",
+                "err_tunnel_connection_failed",
+                "this site can't be reached",
+                "страница недоступна",
+                "нет подключения к интернету",
+                "no internet",
+            ]
+            for phrase in failure_phrases:
+                if phrase in body_lower:
+                    return True, f"Proxy failure detected ({phrase})"
+
+            return False, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    async def extract_resolved_ip_from_start_page(self, page: Page) -> Optional[str]:
+        """Extract confirmed resolved public IPv4 address from start.adspower.net."""
+        try:
+            body_text = await page.inner_text("body", timeout=1000)
+            # Find all IPv4 addresses
+            ips = re.findall(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", body_text)
+            for ip in ips:
+                # Exclude localhost, zero, and private/internal subnets if applicable
+                parts = [int(p) for p in ip.split(".")]
+                if all(0 <= p <= 255 for p in parts):
+                    if ip not in ("127.0.0.1", "0.0.0.0") and not ip.startswith("127."):
+                        return ip
+            return None
+        except Exception:
+            return None
+
     async def is_bad_proxy_page(self, page: Page) -> bool:
         """Check if current page loaded Chrome network error or connection failure."""
         try:
@@ -47,6 +94,9 @@ class EtixDetector:
 
             body_text = await page.inner_text("body", timeout=1000)
             error_phrases = [
+                "proxy failure",
+                "didn't passed the ip checker",
+                "didn't pass the ip checker",
                 "err_proxy_connection_failed",
                 "err_connection_timed_out",
                 "err_tunnel_connection_failed",

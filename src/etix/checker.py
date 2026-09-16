@@ -193,10 +193,20 @@ class EtixCheckEngine:
             config=self.config,
             client=self.client,
             profile_manager=self.profile_manager,
+            detector=self.detector,
         )
         workers = await self.cdp_pool.initialize(count_needed=profiles_count_to_start)
         if not workers:
-            raise RuntimeError("Failed to connect to any AdsPower browser workers via CDP!")
+            raise RuntimeError(
+                f"Фатальная ошибка: 0 рабочих профилей. Все проверенные профили в группе "
+                f"'{self.config.adspower_group_name}' имеют нерабочие прокси (Proxy failure). "
+                f"Проверьте статус прокси в AdsPower."
+            )
+        if len(workers) < profiles_count_to_start:
+            LOGGER.warning(
+                f"Пул инициализирован частично: {len(workers)}/{profiles_count_to_start} рабочих воркеров. "
+                f"Продолжаем проверку доступным составом воркеров."
+            )
 
         # Reset session blocked profiles for this run cycle
         self.profile_manager.clear_session_blocked_profiles()
