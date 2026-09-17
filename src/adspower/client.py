@@ -133,18 +133,13 @@ class AdsPowerClient:
         proxy_config: Dict[str, Any],
     ) -> bool:
         """
-        Update proxy configuration for a profile via AdsPower API.
-        proxy_config: dict with keys proxy_soft, proxy_type, proxy_host, proxy_port, proxy_user, proxy_password.
+        SAFETY INVARIANT (STRICT IMMUTABILITY):
+        Modifying AdsPower profile configurations or proxies via API is strictly prohibited.
+        This safety guard prevents accidental mutation of user's profiles in AdsPower.
         """
-        payload = {
-            "user_id": user_id,
-            "user_proxy_config": proxy_config,
-        }
-        res = await self._request("POST", "/api/v1/user/update", json_data=payload)
-        if res.get("code") == 0:
-            LOGGER.info(f"Successfully updated proxy for profile {user_id} in AdsPower")
-            return True
-        LOGGER.error(f"Failed to update proxy for profile {user_id}: {res.get('msg')}")
+        LOGGER.warning(
+            f"Blocked attempt to modify profile {user_id} in AdsPower (Safety Invariant: Profiles are Immutable)."
+        )
         return False
 
     @staticmethod

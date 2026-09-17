@@ -352,13 +352,33 @@ class CDPBrowserPool:
                     self.workers.remove(failing_worker)
                 return None
 
-            # 4. Assign good proxy to reserve profile via AdsPower API
-            await self.profile_manager.setup_reserve_profile_with_good_proxy(reserve_prof)
-
-            # 5. Connect new reserve profile
+            # 4. Connect new reserve profile directly with native AdsPower settings (Strict Immutability)
+            LOGGER.info(
+                f"Connecting reserve profile '{reserve_prof.name}' ({reserve_prof.user_id}) with native proxy..."
+            )
             new_worker = await self._connect_profile(reserve_prof, worker_index=failing_worker.worker_index)
             if not new_worker:
                 LOGGER.error(f"Failed to connect reserve profile {reserve_prof.user_id}")
+                if failing_worker in self.workers:
+                    self.workers.remove(failing_worker)
+                return None
+
+            # 5. Pre-flight health check on new reserve worker
+            is_healthy, status_msg = await self.validate_worker_connection(new_worker, timeout_s=3.0)
+            if not is_healthy:
+                LOGGER.warning(
+                    f"Reserve profile '{reserve_prof.name}' failed health check ({status_msg}). Closing..."
+                )
+                try:
+                    await new_worker.browser.close()
+                except Exception:
+                    pass
+                try:
+                    await self.client.stop_browser(reserve_prof.user_id)
+                except Exception:
+                    pass
+                reserve_prof.is_open = False
+                self.profile_manager.mark_profile_failed(reserve_prof)
                 if failing_worker in self.workers:
                     self.workers.remove(failing_worker)
                 return None

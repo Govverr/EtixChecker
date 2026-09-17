@@ -273,28 +273,12 @@ class AdsPowerProfileManager:
         good_proxy_str: Optional[str] = None,
     ) -> bool:
         """
-        Update reserve profile proxy via AdsPower API before launching.
-        Ensures proxy is valid and clean.
+        DEPRECATED & DISABLED (Strict Profile Immutability):
+        Checker never mutates user's AdsPower profile configurations or proxies.
+        Profiles must strictly run with their own native settings configured in AdsPower.
         """
-        proxy_str = good_proxy_str or self.get_random_good_proxy()
-        if not proxy_str:
-            LOGGER.warning("No clean good proxy available to assign to reserve profile.")
-            return False
-
-        parsed_cfg = self.client.parse_proxy_string(proxy_str)
-        if not parsed_cfg:
-            LOGGER.error(f"Failed to parse proxy string: {proxy_str}")
-            return False
-
-        ok = await self.client.update_profile_proxy(reserve_profile.user_id, parsed_cfg)
-        if ok:
-            reserve_profile.proxy_host = parsed_cfg["proxy_host"]
-            reserve_profile.proxy_port = parsed_cfg["proxy_port"]
-            reserve_profile.proxy_user = parsed_cfg["proxy_user"]
-            reserve_profile.proxy_password = parsed_cfg["proxy_password"]
-            reserve_profile.proxy_type = parsed_cfg["proxy_type"]
-            LOGGER.info(
-                f"Assigned good proxy {reserve_profile.proxy_key} to reserve profile {reserve_profile.name} ({reserve_profile.user_id})"
-            )
-            return True
+        LOGGER.info(
+            f"Strict Immutability: Profile '{reserve_profile.name}' ({reserve_profile.user_id}) "
+            f"preserves its native AdsPower proxy configuration without modifications."
+        )
         return False
