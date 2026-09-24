@@ -38,6 +38,7 @@ data/blocked_profiles.txt
 data/*.json
 data/proxy_state/
 data/adspower_backup/
+.backup_prev_version/
 
 # Developer documentation & agent instructions (local dev only)
 AGENTS.md

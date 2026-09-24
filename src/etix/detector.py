@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Optional
 from playwright.async_api import Page
 
 from src.config.settings import AppConfig
+from src.utils.logger import LOGGER
 
 
 class EtixDetector:
@@ -113,9 +115,44 @@ class EtixDetector:
         except Exception:
             return False
 
+    async def switch_to_price_level_if_seating_chart(self, page: Page) -> bool:
+        """
+        Check if the page has both 'Seating Chart' and 'Price Level' tabs.
+        If present and not yet active, switch to 'Price Level' tab to reveal ticket selectors.
+        Waits 300-600ms for dynamic rendering.
+        """
+        try:
+            pl_loc = page.locator("a:has-text('Price Level'), button:has-text('Price Level'), [role='tab']:has-text('Price Level')").first
+            sc_loc = page.locator("a:has-text('Seating Chart'), button:has-text('Seating Chart'), [role='tab']:has-text('Seating Chart')").first
+
+            if await pl_loc.is_visible(timeout=400) and await sc_loc.is_visible(timeout=400):
+                is_active = await pl_loc.evaluate("""el => {
+                    const p = el.parentElement;
+                    return el.classList.contains('active') ||
+                           el.classList.contains('selected') ||
+                           el.getAttribute('aria-selected') === 'true' ||
+                           (p && (p.classList.contains('active') || p.classList.contains('selected')));
+                }""")
+                if not is_active:
+                    LOGGER.info("Detected Seating Chart / Price Level tabs. Switching to 'Price Level' view...")
+                    try:
+                        await pl_loc.scroll_into_view_if_needed(timeout=1000)
+                    except Exception:
+                        pass
+                    await pl_loc.click()
+                    await asyncio.sleep(0.4)
+                    LOGGER.info("Switched to 'Price Level' tab successfully.")
+                    return True
+        except Exception as exc:
+            LOGGER.debug(f"Price Level tab check: {exc}")
+        return False
+
     async def has_active_ticket_controls(self, page: Page) -> bool:
         """Check whether page has visible, active ticket quantity selectors."""
         try:
+            # Switch to Price Level first if page has Seating Chart tabs
+            await self.switch_to_price_level_if_seating_chart(page)
+
             controls = page.locator(
                 ".smoketest-ticket-quantity [role='combobox'], "
                 ".smoketest-ticket-quantity .MuiSelect-select, "

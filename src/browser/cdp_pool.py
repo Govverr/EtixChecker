@@ -434,6 +434,7 @@ class CDPBrowserPool:
             self.profile_manager.release_profile(worker.profile)
 
         self.workers.clear()
+        self.profile_manager.reset_session_statuses()
 
         if self.playwright:
             try:

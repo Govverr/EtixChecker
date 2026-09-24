@@ -38,6 +38,7 @@ PROTECTED_PATHS: Set[str] = {
     ".git",
     "tests",
     "scratch",
+    ".backup_prev_version",
 }
 
 
@@ -65,6 +66,8 @@ class UpdateService:
     def __init__(self, root_dir: Optional[Path] = None) -> None:
         self.root_dir = root_dir or Path.cwd()
         self.version_file = self.root_dir / ".version"
+        self.backup_dir = self.root_dir / ".backup_prev_version"
+        self.backup_version_file = self.backup_dir / ".version_backup"
 
     def get_local_version(self) -> Optional[VersionInfo]:
         """Get local commit version from Git or .version metadata file."""
@@ -165,7 +168,11 @@ class UpdateService:
         """
         Download latest main.zip or perform git pull, safely updating files
         without touching protected configuration and data files.
+        Automatically creates a rollback snapshot of previous version before updating.
         """
+        # Create rollback snapshot of current working version
+        self.create_rollback_snapshot()
+
         # 1. Strategy: If git is initialized and available
         if (self.root_dir / ".git").exists():
             try:
@@ -260,3 +267,147 @@ class UpdateService:
                 )
             except Exception as exc:
                 LOGGER.warning(f"Dependency update check failed: {exc}")
+
+    def create_rollback_snapshot(self) -> bool:
+        """
+        Create a clean backup of executable application files in self.backup_dir before updating.
+        Excludes protected user files (.env, shows.csv, proxies, runs, etc.).
+        """
+        try:
+            if self.backup_dir.exists():
+                shutil.rmtree(self.backup_dir, ignore_errors=True)
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
+
+            # Record current version
+            local_ver = self.get_local_version()
+            if local_ver:
+                self.backup_version_file.write_text(
+                    json.dumps(local_ver.to_dict(), indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+            # Copy directories and files that can be updated
+            files_copied = 0
+            for item in self.root_dir.iterdir():
+                rel_str = item.name
+                if self._is_path_protected(rel_str):
+                    continue
+
+                dest = self.backup_dir / rel_str
+                if item.is_file():
+                    shutil.copy2(item, dest)
+                    files_copied += 1
+                elif item.is_dir():
+                    shutil.copytree(
+                        item,
+                        dest,
+                        ignore=lambda src, names: [
+                            n for n in names
+                            if self._is_path_protected(f"{Path(src).relative_to(self.root_dir)}/{n}".replace("\\", "/"))
+                        ],
+                    )
+                    files_copied += 1
+
+            LOGGER.info(f"Created rollback snapshot ({files_copied} items backed up).")
+            return True
+        except Exception as exc:
+            LOGGER.warning(f"Failed to create rollback snapshot: {exc}")
+            return False
+
+    def has_rollback_backup(self) -> bool:
+        """Check if a valid rollback snapshot or git history exists."""
+        if self.backup_dir.exists():
+            items = [i for i in self.backup_dir.iterdir() if i.name != ".version_backup"]
+            if len(items) > 0:
+                return True
+        if (self.root_dir / ".git").exists():
+            return True
+        return False
+
+    def get_rollback_version(self) -> Optional[VersionInfo]:
+        """Get version info of the rollback backup if available."""
+        if self.backup_version_file.exists():
+            try:
+                data = json.loads(self.backup_version_file.read_text(encoding="utf-8"))
+                return VersionInfo(
+                    sha=data.get("sha", ""),
+                    short_sha=data.get("short_sha", data.get("sha", "")[:7]),
+                    message=data.get("message", ""),
+                    author=data.get("author", ""),
+                    date=data.get("date", ""),
+                )
+            except Exception:
+                pass
+        return None
+
+    def rollback_to_backup(self) -> Tuple[bool, str]:
+        """
+        Restore executable files from .backup_prev_version snapshot (or git checkout fallback).
+        Strictly preserves all protected user configuration and data files.
+        """
+        if not self.has_rollback_backup():
+            return False, "Резервная копия предыдущей версии не найдена."
+
+        # Strategy 1: Restore from local snapshot directory
+        if self.backup_dir.exists() and any(i for i in self.backup_dir.iterdir() if i.name != ".version_backup"):
+            try:
+                LOGGER.info("Restoring files from rollback snapshot...")
+                restored_count = 0
+                for item in self.backup_dir.iterdir():
+                    if item.name == ".version_backup":
+                        continue
+                    rel_str = item.name
+                    if self._is_path_protected(rel_str):
+                        continue
+
+                    dest = self.root_dir / rel_str
+                    if item.is_file():
+                        shutil.copy2(item, dest)
+                        restored_count += 1
+                    elif item.is_dir():
+                        for root, dirs, files in os.walk(item):
+                            rel_root = Path(root).relative_to(self.backup_dir)
+                            for f in files:
+                                sub_rel = str(rel_root / f).replace("\\", "/")
+                                if self._is_path_protected(sub_rel):
+                                    continue
+                                src_f = Path(root) / f
+                                dest_f = self.root_dir / sub_rel
+                                dest_f.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(src_f, dest_f)
+                                restored_count += 1
+
+                # Restore version file if available
+                prev_ver = self.get_rollback_version()
+                if prev_ver:
+                    self.version_file.write_text(
+                        json.dumps(prev_ver.to_dict(), indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                self._update_dependencies_if_needed()
+                LOGGER.info(f"Rollback complete: {restored_count} files restored from snapshot.")
+                return True, "Программа успешно возвращена к предыдущей стабильной версии."
+            except Exception as exc:
+                LOGGER.error(f"Failed to rollback from snapshot: {exc}")
+                return False, f"Ошибка при возврате к предыдущей версии: {exc}"
+
+        # Strategy 2: Git rollback fallback
+        if (self.root_dir / ".git").exists():
+            try:
+                LOGGER.info("Attempting git rollback to HEAD~1...")
+                res = subprocess.run(
+                    ["git", "checkout", "HEAD~1", "--", "src", "gui_app.py", "cli.py", "requirements.txt"],
+                    cwd=str(self.root_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if res.returncode == 0:
+                    self._update_dependencies_if_needed()
+                    return True, "Программа успешно возвращена к предыдущей стабильной версии через Git."
+                return False, f"Не удалось выполнить откат через Git: {res.stderr}"
+            except Exception as exc:
+                return False, f"Ошибка при откате через Git: {exc}"
+
+        return False, "Не найден источник для отката к предыдущей версии."

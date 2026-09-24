@@ -267,6 +267,31 @@ class AdsPowerProfileManager:
         """Mark profile as failed for this check cycle."""
         profile.role = ProfileRole.FAILED
 
+    def reset_session_statuses(self) -> None:
+        """
+        Reset in-memory profile roles back to RESERVE (unless externally busy or disabled).
+        Clears session temporary failures so all closed profiles are 100% available for next run.
+        Strictly preserves AdsPower profile immutability (read-only).
+        """
+        reset_count = 0
+        for p in self.profiles:
+            if p.role not in (ProfileRole.BUSY_EXTERNAL, ProfileRole.DISABLED):
+                p.role = ProfileRole.RESERVE
+                p.is_open = False
+                reset_count += 1
+
+        self.clear_session_blocked_profiles()
+        self._session_bad_proxies.clear()
+        LOGGER.info(f"Reset {reset_count} profiles to RESERVE state for clean check cycle.")
+
+    async def refresh_available_profiles(self, group_name: Optional[str] = None) -> List[AdsPowerProfile]:
+        """
+        Refresh profile list and their running states from AdsPower for the given group.
+        Guarantees that clean, closed profiles are recognized as free.
+        """
+        target_group = group_name or getattr(self, "group_name", "Inventory Etix (DO NOT TOUCH)")
+        return await self.load_and_organize_profiles(group_name=target_group)
+
     async def setup_reserve_profile_with_good_proxy(
         self,
         reserve_profile: AdsPowerProfile,

@@ -366,7 +366,45 @@ class EtixGuiApp(ctk.CTk):
             border_width=1,
             corner_radius=8,
         )
-        self.adspower_pill.pack(side="right", padx=(10, 0))
+        self.adspower_pill.pack(side="right", padx=(6, 0))
+
+        # AdsPower Group/Folder Dropdown Selector
+        self.group_frame = ctk.CTkFrame(
+            header_inner,
+            fg_color="#182038",
+            border_color="#263352",
+            border_width=1,
+            corner_radius=8,
+        )
+        self.group_frame.pack(side="right", padx=(6, 6))
+
+        self.lbl_group_icon = ctk.CTkLabel(
+            self.group_frame,
+            text="📁 Папка:",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+            text_color=COLOR_TEXT_MUTED,
+        )
+        self.lbl_group_icon.pack(side="left", padx=(10, 6), pady=6)
+
+        self.combo_group = ctk.CTkOptionMenu(
+            self.group_frame,
+            values=[CONFIG.adspower_group_name],
+            command=self._on_group_selected,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            dropdown_font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            fg_color="#202c4c",
+            button_color="#2a374f",
+            button_hover_color="#334155",
+            text_color="#f8fafc",
+            dropdown_fg_color="#121829",
+            dropdown_hover_color="#1e293b",
+            dropdown_text_color="#f8fafc",
+            width=230,
+            height=28,
+            corner_radius=6,
+        )
+        self.combo_group.set(CONFIG.adspower_group_name)
+        self.combo_group.pack(side="left", padx=(0, 8), pady=6)
 
         self.lbl_adspower_dot = ctk.CTkLabel(
             self.adspower_pill,
@@ -436,6 +474,9 @@ class EtixGuiApp(ctk.CTk):
 
         self.btn_updates = self._create_action_btn("🔄  Проверить обновления", self._on_check_updates_clicked)
         self.btn_updates.pack(side="left", padx=6)
+
+        self.btn_rollback = self._create_action_btn("⏪  Откатить версию", self._on_rollback_clicked)
+        self.btn_rollback.pack(side="left", padx=6)
 
         # 4. Main Content Card with Tabs (Dashboard Cards vs Live Logs)
         self.main_card = ctk.CTkFrame(
@@ -1066,6 +1107,18 @@ class EtixGuiApp(ctk.CTk):
             async def run():
                 alive = await self.client.check_status()
                 if alive:
+                    # Fetch available groups from AdsPower and prioritize Etix/Inventory
+                    try:
+                        raw_groups = await self.client.get_groups(page_size=100)
+                        group_names = [g.get("group_name", "").strip() for g in raw_groups if g.get("group_name")]
+                        prio = [g for g in group_names if "etix" in g.lower() or "inventory" in g.lower()]
+                        other = [g for g in group_names if g not in prio]
+                        sorted_groups = prio + sorted(other, key=str.lower)
+                        if sorted_groups:
+                            self.event_queue.put(("groups_loaded", sorted_groups))
+                    except Exception as g_err:
+                        LOGGER.warning(f"Failed to fetch groups from AdsPower: {g_err}")
+
                     profiles = await self.profile_manager.load_and_organize_profiles(
                         group_name=CONFIG.adspower_group_name,
                     )
@@ -1090,6 +1143,34 @@ class EtixGuiApp(ctk.CTk):
                             0,
                         )
                     )
+
+            asyncio.run(run())
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_group_selected(self, choice: str) -> None:
+        if not choice or choice == CONFIG.adspower_group_name:
+            return
+        self._log(f"📁 Переключение на папку профилей: '{choice}'...")
+        save_delays_to_dotenv({"ADSPOWER_GROUP_NAME": choice})
+        reload_config()
+
+        def worker():
+            async def run():
+                profiles = await self.profile_manager.load_and_organize_profiles(group_name=choice)
+                free_count = len(self.profile_manager.get_available_free_profiles())
+                busy_count = len(self.profile_manager.get_busy_external_profiles())
+                total_count = len(profiles)
+                busy_tag = f" • {busy_count} занято" if busy_count > 0 else ""
+                self.event_queue.put(
+                    (
+                        "adspower_status",
+                        True,
+                        f"AdsPower: {free_count} своб. из {total_count}{busy_tag}",
+                        free_count,
+                    )
+                )
+                self.event_queue.put(("group_selected_done", choice, total_count, free_count))
 
             asyncio.run(run())
 
@@ -1127,6 +1208,7 @@ class EtixGuiApp(ctk.CTk):
         selected_shows = [c.show for c in selected_cards]
 
         # Pre-flight Concurrency & Profile Sufficiency Check
+        self.profile_manager.reset_session_statuses()
         free_profiles = self.profile_manager.get_available_free_profiles()
         busy_profiles = self.profile_manager.get_busy_external_profiles()
 
@@ -1218,6 +1300,30 @@ class EtixGuiApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_rollback_clicked(self) -> None:
+        """Handle 1-click rollback to previous version."""
+        if not self.update_service.has_rollback_backup():
+            messagebox.showinfo("Откат версии", "Резервная копия предыдущей версии не найдена на этом компьютере.")
+            return
+
+        prev_info = self.update_service.get_rollback_version()
+        ver_str = f"коммит {prev_info.short_sha}" if prev_info else "предыдущую версию"
+        prompt = (
+            f"Вы действительно хотите вернуться к предыдущей стабильной версии программы ({ver_str})?\n\n"
+            f"⚠️ Ваши настройки (.env, shows.csv, списки прокси) будут сохранены без изменений."
+        )
+        if not messagebox.askyesno("Подтверждение отката", prompt):
+            return
+
+        self.btn_rollback.configure(state="disabled", text="⏳  Откат...")
+        self._log("⏪ Восстановление предыдущей версии программы...")
+
+        def worker():
+            ok, msg = self.update_service.rollback_to_backup()
+            self.event_queue.put(("rollback_applied", ok, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _poll_queue(self) -> None:
         try:
             while True:
@@ -1231,6 +1337,20 @@ class EtixGuiApp(ctk.CTk):
                     self.lbl_adspower_dot.configure(text_color=dot_color)
                     self.lbl_adspower.configure(text=text, text_color=txt_color)
                     self.stat_workers.lbl_val.configure(text=f"{active_count} профилей" if ok else "Офлайн")
+
+                elif kind == "groups_loaded":
+                    sorted_groups = msg[1]
+                    if hasattr(self, "combo_group") and sorted_groups:
+                        self.combo_group.configure(values=sorted_groups)
+                        curr = CONFIG.adspower_group_name
+                        if curr in sorted_groups:
+                            self.combo_group.set(curr)
+                        elif sorted_groups:
+                            self.combo_group.set(sorted_groups[0])
+
+                elif kind == "group_selected_done":
+                    choice, total_count, free_count = msg[1], msg[2], msg[3]
+                    self._log(f"📁 Папка '{choice}' активирована: {free_count} своб. из {total_count} профилей.")
 
                 elif kind == "backup_done":
                     ok, path_or_err = msg[1], msg[2]
@@ -1271,10 +1391,20 @@ class EtixGuiApp(ctk.CTk):
                     ok, res_msg = msg[1], msg[2]
                     if ok:
                         self._log(f"🎉 {res_msg}")
-                        messagebox.showinfo("Обновление завершено", f"{res_msg}\n\nПожалуйста, перезапустите программу для вступления изменений в силу.")
+                        messagebox.showinfo("Обновление завершено", f"{res_msg}\n\nПожалуйста, перезапустите приложение для вступления изменений в силу.")
                     else:
                         self._log(f"❌ Ошибка обновления: {res_msg}")
                         messagebox.showerror("Ошибка обновления", res_msg)
+
+                elif kind == "rollback_applied":
+                    self.btn_rollback.configure(state="normal", text="⏪  Откатить версию")
+                    ok, res_msg = msg[1], msg[2]
+                    if ok:
+                        self._log(f"🎉 {res_msg}")
+                        messagebox.showinfo("Откат завершен", f"{res_msg}\n\nПожалуйста, перезапустите приложение для вступления изменений в силу.")
+                    else:
+                        self._log(f"❌ Ошибка отката: {res_msg}")
+                        messagebox.showerror("Ошибка отката", res_msg)
 
                 elif kind == "show_done":
                     res: CheckResult = msg[1]
@@ -1285,6 +1415,7 @@ class EtixGuiApp(ctk.CTk):
                     self._log(f"[{res.status.value}] {res.name} — Резерв: {res.reserved}/{res.target} ({res.details})")
 
                 elif kind == "check_completed":
+                    self.profile_manager.reset_session_statuses()
                     results: List[CheckResult] = msg[1]
                     self.is_running = False
                     self.btn_start.configure(state="normal", text="▶  Запустить проверку")
@@ -1320,6 +1451,7 @@ class EtixGuiApp(ctk.CTk):
                         messagebox.showinfo("Готово", "Проверка завершена! Результаты сохранены в report.csv.")
 
                 elif kind == "check_failed":
+                    self.profile_manager.reset_session_statuses()
                     self.is_running = False
                     self.btn_start.configure(state="normal", text="▶  Запустить проверку")
                     self.stat_status.lbl_val.configure(text="❌ Ошибка", text_color="#ef4444")

@@ -146,9 +146,10 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
     """
     Detects and smoothly solves the DataDome slider challenge across all frames (main and iframes)
     using humanized Bezier mouse motion with bio-realistic hesitation pauses.
+    Performs up to 2 attempts with alternate trajectories before giving up.
     Returns True if solved and verified, False otherwise.
     """
-    LOGGER.info("Attempting humanized Drag & Drop on DataDome slider across all frames...")
+    LOGGER.info("Attempting humanized Drag & Drop on DataDome slider across all frames (up to 2 attempts)...")
 
     slider_targets = [
         "[role='slider']",
@@ -180,183 +181,199 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         "#sec-cpt-content",
     ]
 
-    target_handle = None
-    target_frame: Optional[Frame] = None
+    for attempt in range(1, 3):
+        LOGGER.info(f"Executing DataDome slider solve attempt {attempt}/2...")
 
-    # Step 1: Scan frames prioritizing captcha-delivery / datadome iframes
-    frames_to_check: List[Optional[Frame]] = []
-    for frame in page.frames:
-        f_url = (frame.url or "").lower()
-        if "captcha" in f_url or "datadome" in f_url:
-            frames_to_check.insert(0, frame)
-        else:
-            frames_to_check.append(frame)
+        target_handle = None
+        target_frame: Optional[Frame] = None
 
-    # Also add main page scope (None means page level)
-    scopes = frames_to_check + [None]
-
-    for scope in scopes:
-        context = scope if scope is not None else page
-        for sel in slider_targets:
-            try:
-                loc = context.locator(sel).first
-                if await loc.is_visible(timeout=300):
-                    target_handle = loc
-                    target_frame = scope
-                    break
-            except Exception:
-                continue
-        if target_handle:
-            break
-
-    # If still not found, check iframe elements explicitly
-    if not target_handle:
-        try:
-            iframe_loc = page.locator("iframe[src*='captcha-delivery'], iframe[src*='datadome']").first
-            if await iframe_loc.is_visible(timeout=500):
-                c_frame = await iframe_loc.content_frame()
-                if c_frame:
-                    for sel in slider_targets:
-                        try:
-                            loc = c_frame.locator(sel).first
-                            if await loc.is_visible(timeout=300):
-                                target_handle = loc
-                                target_frame = c_frame
-                                break
-                        except Exception:
-                            continue
-        except Exception:
-            pass
-
-    if not target_handle:
-        LOGGER.warning("Could not find DataDome slider handle in any page/frames.")
-        return False
-
-    try:
-        box_handle = await target_handle.bounding_box()
-        if not box_handle or box_handle.get("width", 0) <= 0:
-            LOGGER.warning("Found slider handle but bounding box is invalid.")
-            return False
-
-        # Find corresponding track element
-        search_context = target_frame if target_frame is not None else page
-        box_track = None
-        for t_sel in track_targets:
-            try:
-                t_loc = search_context.locator(t_sel).first
-                if await t_loc.is_visible(timeout=200):
-                    candidate_box = await t_loc.bounding_box()
-                    if candidate_box and candidate_box.get("width", 0) > box_handle["width"]:
-                        box_track = candidate_box
-                        break
-            except Exception:
-                continue
-
-        start_x = box_handle["x"] + box_handle["width"] / 2.0
-        start_y = box_handle["y"] + box_handle["height"] / 2.0
-
-        if box_track:
-            # Full reach to right bumper: track_x + track_width - handle_width/2 + slight positive bumper push
-            end_x = (box_track["x"] + box_track["width"]) - (box_handle["width"] / 2.0) + random.uniform(2.0, 4.5)
-        else:
-            # Try to measure parent container width dynamically
-            try:
-                p_width = await target_handle.evaluate(
-                    "el => el.parentElement ? el.parentElement.getBoundingClientRect().width : 0"
-                )
-                if p_width and p_width > box_handle["width"] * 1.5:
-                    end_x = box_handle["x"] + p_width - (box_handle["width"] / 2.0) + random.uniform(2.0, 4.0)
-                else:
-                    distance = random.uniform(310.0, 335.0)
-                    end_x = start_x + distance
-            except Exception:
-                distance = random.uniform(310.0, 335.0)
-                end_x = start_x + distance
-
-        # Clamp end_x to viewport width
-        vp = page.viewport_size or {"width": 1280, "height": 800}
-        end_x = min(end_x, vp["width"] - 8)
-        end_y = start_y + random.uniform(-1.0, 1.0)
-
-        LOGGER.info(
-            f"Slider drag plan: start=({start_x:.1f}, {start_y:.1f}) -> end=({end_x:.1f}, {end_y:.1f}) "
-            f"[Distance: {end_x - start_x:.1f}px]"
-        )
-
-        # 1. Hover/Move to slider handle with natural human pre-positioning
-        try:
-            await target_handle.hover(timeout=1500)
-        except Exception:
-            await page.mouse.move(start_x, start_y)
-
-        # 2. Pre-grab eye-hand reaction pause
-        await asyncio.sleep(random.uniform(0.18, 0.32))
-
-        # 3. Press left mouse button down
-        await page.mouse.down()
-
-        # 4. Post-grab hesitation delay before movement starts
-        await asyncio.sleep(random.uniform(0.08, 0.16))
-
-        # 5. Move along humanized Bezier curve
-        steps = random.randint(28, 38)
-        points = _generate_bezier_points(start_x, start_y, end_x, end_y, steps=steps)
-        pause_milestone = random.randint(int(steps * 0.4), int(steps * 0.7))
-
-        for idx, (px, py) in enumerate(points):
-            await page.mouse.move(px, py)
-            # Occasional micro-pause simulating motor coordination
-            if idx == pause_milestone:
-                await asyncio.sleep(random.uniform(0.015, 0.035))
+        # Step 1: Scan frames prioritizing captcha-delivery / datadome iframes
+        frames_to_check: List[Optional[Frame]] = []
+        for frame in page.frames:
+            f_url = (frame.url or "").lower()
+            if "captcha" in f_url or "datadome" in f_url:
+                frames_to_check.insert(0, frame)
             else:
-                # Vary speed across curve
-                phase_ratio = idx / steps
-                if phase_ratio < 0.25 or phase_ratio > 0.8:
-                    await asyncio.sleep(random.uniform(0.012, 0.024))
-                else:
-                    await asyncio.sleep(random.uniform(0.007, 0.016))
+                frames_to_check.append(frame)
 
-        # 6. Lock-in phase: forward bumper touch ensuring hardware trigger registration
-        await page.mouse.move(end_x + random.uniform(1.0, 2.5), end_y)
-        await asyncio.sleep(random.uniform(0.06, 0.12))
-        await page.mouse.move(end_x, end_y)
-        await asyncio.sleep(random.uniform(0.14, 0.24))
+        scopes = frames_to_check + [None]
 
-        # 7. Release mouse button
-        await page.mouse.up()
-        LOGGER.info("Completed slider drag motion with lock-in. Awaiting DataDome validation...")
+        for scope in scopes:
+            context = scope if scope is not None else page
+            for sel in slider_targets:
+                try:
+                    loc = context.locator(sel).first
+                    if await loc.is_visible(timeout=300):
+                        target_handle = loc
+                        target_frame = scope
+                        break
+                except Exception:
+                    continue
+            if target_handle:
+                break
 
-        # 8. Verification loop: wait up to 3.5s for challenge to resolve
-        for _ in range(7):
-            await asyncio.sleep(0.5)
+        # Check explicit iframe if needed
+        if not target_handle:
             try:
-                # Check if slider handle has vanished or hidden
-                if not await target_handle.is_visible(timeout=300):
-                    LOGGER.info("DataDome slider cleared successfully!")
-                    return True
-            except Exception:
-                LOGGER.info("DataDome slider handle detached / solved!")
-                return True
-
-            # Check if datadome cookie is now present in browser context
-            try:
-                cookies = await page.context.cookies()
-                dd_cookies = [c for c in cookies if "datadome" in c.get("name", "").lower()]
-                if dd_cookies and any(len(c.get("value", "")) > 20 for c in dd_cookies):
-                    LOGGER.info(f"Found active DataDome session cookie: {dd_cookies[0]['name']}")
-                    return True
+                iframe_loc = page.locator("iframe[src*='captcha-delivery'], iframe[src*='datadome']").first
+                if await iframe_loc.is_visible(timeout=500):
+                    c_frame = await iframe_loc.content_frame()
+                    if c_frame:
+                        for sel in slider_targets:
+                            try:
+                                loc = c_frame.locator(sel).first
+                                if await loc.is_visible(timeout=300):
+                                    target_handle = loc
+                                    target_frame = c_frame
+                                    break
+                            except Exception:
+                                continue
             except Exception:
                 pass
 
-        # Final check if slider is still visible
-        try:
-            if not await target_handle.is_visible(timeout=500):
-                LOGGER.info("DataDome slider solved!")
-                return True
-        except Exception:
-            return True
+        if not target_handle:
+            LOGGER.warning(f"Could not find DataDome slider handle in any page/frames (attempt {attempt}/2).")
+            if attempt < 2:
+                await asyncio.sleep(0.8)
+                continue
+            return False
 
-    except Exception as exc:
-        LOGGER.warning(f"Failed to execute slider drag: {exc}")
+        try:
+            try:
+                await target_handle.scroll_into_view_if_needed(timeout=1000)
+            except Exception:
+                pass
+
+            box_handle = await target_handle.bounding_box()
+            if not box_handle or box_handle.get("width", 0) <= 0:
+                LOGGER.warning("Found slider handle but bounding box is invalid.")
+                if attempt < 2:
+                    await asyncio.sleep(0.6)
+                    continue
+                return False
+
+            # Find track
+            search_context = target_frame if target_frame is not None else page
+            box_track = None
+            for t_sel in track_targets:
+                try:
+                    t_loc = search_context.locator(t_sel).first
+                    if await t_loc.is_visible(timeout=200):
+                        candidate_box = await t_loc.bounding_box()
+                        if candidate_box and candidate_box.get("width", 0) > box_handle["width"]:
+                            box_track = candidate_box
+                            break
+                except Exception:
+                    continue
+
+            start_x = box_handle["x"] + box_handle["width"] / 2.0
+            start_y = box_handle["y"] + box_handle["height"] / 2.0
+
+            if box_track:
+                # Extra bumper push on attempt 2 to guarantee trigger
+                push = random.uniform(3.5, 6.0) if attempt == 2 else random.uniform(2.0, 4.5)
+                end_x = (box_track["x"] + box_track["width"]) - (box_handle["width"] / 2.0) + push
+            else:
+                try:
+                    p_width = await target_handle.evaluate(
+                        "el => el.parentElement ? el.parentElement.getBoundingClientRect().width : 0"
+                    )
+                    if p_width and p_width > box_handle["width"] * 1.5:
+                        push = random.uniform(3.0, 5.0) if attempt == 2 else random.uniform(2.0, 4.0)
+                        end_x = box_handle["x"] + p_width - (box_handle["width"] / 2.0) + push
+                    else:
+                        distance = random.uniform(315.0, 340.0)
+                        end_x = start_x + distance
+                except Exception:
+                    distance = random.uniform(315.0, 340.0)
+                    end_x = start_x + distance
+
+            vp = page.viewport_size or {"width": 1280, "height": 800}
+            end_x = min(end_x, vp["width"] - 6)
+            end_y = start_y + random.uniform(-1.0, 1.0)
+
+            LOGGER.info(
+                f"[Attempt {attempt}/2] Slider drag plan: start=({start_x:.1f}, {start_y:.1f}) -> end=({end_x:.1f}, {end_y:.1f}) "
+                f"[Distance: {end_x - start_x:.1f}px]"
+            )
+
+            # Ensure focus on handle / iframe
+            try:
+                await target_handle.focus()
+            except Exception:
+                pass
+
+            # Hover to handle
+            try:
+                await target_handle.hover(timeout=1500)
+            except Exception:
+                await page.mouse.move(start_x, start_y)
+
+            await asyncio.sleep(random.uniform(0.15, 0.28))
+            await page.mouse.down()
+            await asyncio.sleep(random.uniform(0.06, 0.14))
+
+            # Bezier points: slightly faster on attempt 2
+            steps = random.randint(24, 32) if attempt == 2 else random.randint(28, 38)
+            points = _generate_bezier_points(start_x, start_y, end_x, end_y, steps=steps)
+            pause_milestone = random.randint(int(steps * 0.4), int(steps * 0.7))
+
+            for idx, (px, py) in enumerate(points):
+                await page.mouse.move(px, py)
+                if idx == pause_milestone and attempt == 1:
+                    await asyncio.sleep(random.uniform(0.012, 0.025))
+                else:
+                    phase_ratio = idx / steps
+                    if phase_ratio < 0.25 or phase_ratio > 0.8:
+                        await asyncio.sleep(random.uniform(0.008, 0.018))
+                    else:
+                        await asyncio.sleep(random.uniform(0.005, 0.012))
+
+            # Lock-in phase
+            await page.mouse.move(end_x + random.uniform(1.0, 3.0), end_y)
+            await asyncio.sleep(random.uniform(0.06, 0.12))
+            await page.mouse.move(end_x, end_y)
+            await asyncio.sleep(random.uniform(0.12, 0.22))
+
+            await page.mouse.up()
+            LOGGER.info(f"[Attempt {attempt}/2] Completed slider drag motion. Checking validation...")
+
+            # Verification loop
+            for _ in range(6):
+                await asyncio.sleep(0.5)
+                try:
+                    if not await target_handle.is_visible(timeout=300):
+                        LOGGER.info("DataDome slider cleared successfully!")
+                        return True
+                except Exception:
+                    LOGGER.info("DataDome slider handle detached / solved!")
+                    return True
+
+                try:
+                    cookies = await page.context.cookies()
+                    dd_cookies = [c for c in cookies if "datadome" in c.get("name", "").lower()]
+                    if dd_cookies and any(len(c.get("value", "")) > 20 for c in dd_cookies):
+                        LOGGER.info(f"Found active DataDome session cookie: {dd_cookies[0]['name']}")
+                        return True
+                except Exception:
+                    pass
+
+            # If not solved and attempt == 1, pause before retry
+            if attempt < 2:
+                LOGGER.info("Slider not cleared after first attempt. Retrying with alternate curve in 0.6s...")
+                await asyncio.sleep(0.6)
+
+        except Exception as exc:
+            LOGGER.warning(f"Failed to execute slider drag on attempt {attempt}: {exc}")
+            if attempt < 2:
+                await asyncio.sleep(0.6)
+
+    # Final check after all attempts
+    try:
+        if target_handle and not await target_handle.is_visible(timeout=500):
+            LOGGER.info("DataDome slider solved on final check!")
+            return True
+    except Exception:
+        return True
 
     return False

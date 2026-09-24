@@ -30,6 +30,9 @@ class EtixCartHandler:
         Supports Material-UI comboboxes and standard select elements.
         Distinguishes between quantity dropdowns (0, 1, 2...) and price tier dropdowns ('Best Available').
         """
+        # If Seating Chart tabs are present, switch to Price Level view
+        await self.detector.switch_to_price_level_if_seating_chart(page)
+
         try:
             await page.wait_for_selector(
                 ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select",
@@ -375,10 +378,12 @@ class EtixCartHandler:
         Select ticket quantity, click Add to Cart, and wait for confirmation.
         Returns: (success, reserved_qty, status_message)
         """
+        await self.detector.switch_to_price_level_if_seating_chart(page)
         control = await self.find_ticket_select(page, ticket_index)
         if not control:
             # Fallback: wait 1.5s for dynamic React/MUI hydration and retry
             await asyncio.sleep(1.5)
+            await self.detector.switch_to_price_level_if_seating_chart(page)
             control = await self.find_ticket_select(page, ticket_index)
             if not control:
                 return False, 0, "Dropdown/селектор выбора количества не найден"
