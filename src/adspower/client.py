@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -22,6 +23,8 @@ class AdsPowerClient:
         self.fallback_url = fallback_url.rstrip("/")
         self.timeout = timeout
         self._active_base_url: Optional[str] = self.base_url
+        self._cached_groups: List[Dict[str, Any]] = []
+        self._groups_cached_at: float = 0.0
 
     async def _request(
         self,
@@ -29,31 +32,38 @@ class AdsPowerClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
+        retries: int = 3,
     ) -> Dict[str, Any]:
-        """Send HTTP request with automatic URL fallback."""
+        """Send HTTP request with automatic URL fallback and rate limit handling."""
         urls_to_try = [self.base_url, self.fallback_url]
         if self._active_base_url and self._active_base_url in urls_to_try:
             urls_to_try.remove(self._active_base_url)
             urls_to_try.insert(0, self._active_base_url)
 
         last_err: Optional[Exception] = None
-        for b_url in urls_to_try:
-            full_url = f"{b_url}{endpoint}"
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    resp = await client.request(
-                        method=method,
-                        url=full_url,
-                        params=params,
-                        json=json_data,
-                    )
-                    data = resp.json()
-                    if data.get("code") == 0:
-                        self._active_base_url = b_url
-                    return data
-            except Exception as exc:
-                last_err = exc
-                continue
+        for attempt in range(retries):
+            for b_url in urls_to_try:
+                full_url = f"{b_url}{endpoint}"
+                try:
+                    async with httpx.AsyncClient(timeout=self.timeout) as client:
+                        resp = await client.request(
+                            method=method,
+                            url=full_url,
+                            params=params,
+                            json=json_data,
+                        )
+                        data = resp.json()
+                        msg = str(data.get("msg", "")).lower()
+                        if data.get("code") == -1 and "too many request" in msg:
+                            LOGGER.warning(f"AdsPower API rate limit reached ({endpoint}). Waiting 1.1s before retrying...")
+                            await asyncio.sleep(1.1)
+                            break
+                        if data.get("code") == 0:
+                            self._active_base_url = b_url
+                        return data
+                except Exception as exc:
+                    last_err = exc
+                    continue
 
         LOGGER.error(f"AdsPower API request failed for {endpoint}: {last_err}")
         return {"code": -1, "msg": f"Connection failed: {last_err}", "data": {}}
@@ -63,12 +73,19 @@ class AdsPowerClient:
         res = await self._request("GET", "/status")
         return res.get("code") == 0
 
-    async def get_groups(self, page_size: int = 100) -> List[Dict[str, Any]]:
-        """Get all profile groups."""
+    async def get_groups(self, page_size: int = 100, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Get all profile groups with cache support to avoid rate limits."""
+        now = time.time()
+        if not force_refresh and self._cached_groups and (now - self._groups_cached_at < 30.0):
+            return self._cached_groups
+
         res = await self._request("GET", "/api/v1/group/list", params={"page_size": page_size})
         if res.get("code") == 0:
-            return res.get("data", {}).get("list", [])
-        return []
+            groups = res.get("data", {}).get("list", [])
+            self._cached_groups = groups
+            self._groups_cached_at = now
+            return groups
+        return self._cached_groups if self._cached_groups else []
 
     async def find_group_id_by_name(
         self,
@@ -90,18 +107,40 @@ class AdsPowerClient:
         group_name: Optional[str] = None,
         page_size: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Get all profiles in a given group."""
-        if not group_id and group_name:
+        """
+        Get all profiles in a given group, paginating through all available pages.
+        If group_name is None, empty, or 'Все группы', fetches profiles across all groups.
+        """
+        is_all = not group_name or group_name.strip().lower() in ("все группы", "all groups", "все профили", "all")
+        if not group_id and group_name and not is_all:
             group_id = await self.find_group_id_by_name(group_name)
+            if not group_id:
+                LOGGER.warning(f"Group '{group_name}' not found in AdsPower.")
+                return []
 
-        params: Dict[str, Any] = {"page_size": page_size}
-        if group_id:
-            params["group_id"] = group_id
+        all_profiles: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            params: Dict[str, Any] = {"page_size": page_size, "page": page}
+            if group_id:
+                params["group_id"] = group_id
 
-        res = await self._request("GET", "/api/v1/user/list", params=params)
-        if res.get("code") == 0:
-            return res.get("data", {}).get("list", [])
-        return []
+            res = await self._request("GET", "/api/v1/user/list", params=params)
+            if res.get("code") != 0:
+                break
+
+            p_list = res.get("data", {}).get("list", [])
+            if not p_list:
+                break
+
+            all_profiles.extend(p_list)
+            if len(p_list) < page_size:
+                break
+
+            page += 1
+            await asyncio.sleep(0.3)
+
+        return all_profiles
 
     async def start_browser(
         self,

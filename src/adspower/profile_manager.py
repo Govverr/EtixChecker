@@ -164,7 +164,7 @@ class AdsPowerProfileManager:
                 name=str(item.get("name", "")),
                 serial_number=str(item.get("serial_number", "")),
                 group_id=str(item.get("group_id", "")),
-                group_name=group_name,
+                group_name=str(item.get("group_name") or group_name),
                 proxy_host=str(proxy_cfg.get("proxy_host", "")),
                 proxy_port=str(proxy_cfg.get("proxy_port", "")),
                 proxy_user=str(proxy_cfg.get("proxy_user", "")),

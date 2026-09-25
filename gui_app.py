@@ -1113,7 +1113,7 @@ class EtixGuiApp(ctk.CTk):
                         group_names = [g.get("group_name", "").strip() for g in raw_groups if g.get("group_name")]
                         prio = [g for g in group_names if "etix" in g.lower() or "inventory" in g.lower()]
                         other = [g for g in group_names if g not in prio]
-                        sorted_groups = prio + sorted(other, key=str.lower)
+                        sorted_groups = ["Все группы"] + prio + sorted(other, key=str.lower)
                         if sorted_groups:
                             self.event_queue.put(("groups_loaded", sorted_groups))
                     except Exception as g_err:
