@@ -398,14 +398,21 @@ class EtixDetector:
 
     async def is_cart_page(self, page: Page) -> bool:
         """Check whether page navigated to Shopping Cart / Review step."""
-        url = page.url.lower()
+        url = (page.url or "").lower()
         cart_keywords = ["cart", "shoppingcart", "viewshoppingcart", "checkout", "review", "basket"]
         if any(k in url for k in cart_keywords):
             return True
         try:
-            has_cart_elem = await page.locator(
-                ".cart-item, #cart-container, .order-summary, table.cart, #shopping-cart, .shoppingCart"
-            ).first.is_visible(timeout=500)
+            cart_selectors = (
+                ".cart-item, #cart-container, .order-summary, table.cart, #shopping-cart, .shoppingCart, "
+                "[class*='cart-item'], .cart-table, .cart-ticket-item, .cart-header, "
+                "a:has-text('Clear Shopping Cart'), button:has-text('Clear Shopping Cart'), "
+                "a:has-text('Empty Shopping Cart'), button:has-text('Empty Shopping Cart'), "
+                "a:has-text('Clear Cart'), button:has-text('Clear Cart'), "
+                "a:has-text('Checkout'), button:has-text('Checkout'), input[value*='Checkout'], "
+                "h1:has-text('Shopping Cart'), h2:has-text('Shopping Cart'), div:has-text('Shopping Cart')"
+            )
+            has_cart_elem = await page.locator(cart_selectors).first.is_visible(timeout=250)
             return bool(has_cart_elem)
         except Exception:
             return False

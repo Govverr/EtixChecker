@@ -592,13 +592,32 @@ class EtixCheckEngine:
         )
 
         # Step 9: Staggered release of carts after hold delay
-        if total_reserved > 0:
-            LOGGER.info(f"Holding reservations for {self.config.delay_before_clear_carts_s}s before clearing carts...")
-            await asyncio.sleep(self.config.delay_before_clear_carts_s)
+        workers_to_clear = list(success_workers)
+        # Defense-in-depth safety net: If total_reserved is 0 due to an unexpected edge case,
+        # inspect active workers to ensure no reserved tickets are abandoned in shopping carts!
+        if not workers_to_clear:
+            for w in active_cart_workers:
+                try:
+                    if await self.detector.is_cart_page(w.page):
+                        LOGGER.warning(
+                            f"[Worker #{w.worker_index}] Detected on cart page despite total_reserved=0. "
+                            f"Adding to cart release list to prevent abandoned reservations."
+                        )
+                        workers_to_clear.append(w)
+                except Exception:
+                    pass
+
+        if workers_to_clear:
+            hold_time = self.config.delay_before_clear_carts_s if total_reserved > 0 else 1.0
+            LOGGER.info(
+                f"Holding reservations for {hold_time}s before clearing carts "
+                f"({len(workers_to_clear)} workers)..."
+            )
+            await asyncio.sleep(hold_time)
 
             clear_tasks = []
             accumulated_clear_delay = 0.0
-            for w in success_workers:
+            for w in workers_to_clear:
                 clear_tasks.append(
                     self._staggered_clear_cart(w, delay_s=accumulated_clear_delay)
                 )

@@ -442,20 +442,61 @@ class EtixCartHandler:
 
 
         # Wait dynamically for navigation, cart confirmation, or captcha challenge
-        deadline = asyncio.get_event_loop().time() + 6.0
+        # Under multi-worker proxy load, Etix cart addition/redirection may take 3-8s.
+        deadline = asyncio.get_event_loop().time() + 15.0
         while asyncio.get_event_loop().time() < deadline:
+            # 1. Shopping cart page or elements reached!
             if await self.detector.is_cart_page(page):
-                break
+                LOGGER.info("Cart page detected during dynamic wait.")
+                return True, selected_qty, "Успешно добавлено в корзину"
+
+            # 2. Captcha challenge detected
             if await is_recaptcha_challenge_visible(page):
+                LOGGER.info("reCAPTCHA challenge detected during dynamic wait.")
                 break
+
             if await self.detector.is_slider_captcha(page) or await self.detector.is_blocked_page(page):
+                LOGGER.info("DataDome slider or blocked page detected during dynamic wait.")
                 break
+
+            # 3. Tax scheme conflict detected
+            if await self.detector.is_tax_scheme_conflict(page):
+                LOGGER.info("Tax scheme conflict detected during dynamic wait.")
+                break
+
+            # 4. Explicit error banner indicating sold out or per-order limit
+            # IMPORTANT: Never break on generic div[role='alert'] because venue disclaimers/rules
+            # are permanently present in DOM before and after submission!
+            has_fatal_error = False
             try:
-                alert_elem = page.locator("div[role='alert'], .alert-danger, .error-message").first
-                if await alert_elem.is_visible(timeout=100):
-                    break
+                for err_sel in [".alert-danger", ".alert-error", ".error-message", ".smoketest-error"]:
+                    err_loc = page.locator(err_sel).first
+                    if await err_loc.is_visible(timeout=50):
+                        err_text = (await err_loc.inner_text()).strip()
+                        if (
+                            self.detector.is_inventory_message(err_text)
+                            or any(
+                                w in err_text.lower()
+                                for w in [
+                                    "sorry",
+                                    "sold out",
+                                    "limit",
+                                    "exhaust",
+                                    "unable",
+                                    "not enough",
+                                    "over the per order",
+                                ]
+                            )
+                        ):
+                            LOGGER.warning(f"Add tickets rejected by site during wait: '{err_text}'")
+                            has_fatal_error = True
+                            break
             except Exception:
                 pass
+
+            if has_fatal_error:
+                break
+
             await asyncio.sleep(0.3)
 
         # Check if DataDome slider appeared upon clicking Add Tickets
@@ -573,12 +614,21 @@ class EtixCartHandler:
         # Check for visible shopping cart badge, table, or order summary in DOM
         try:
             cart_elem = page.locator(
-                ".cart-item, #cart-container, .order-summary, table.cart, #shopping-cart, .shoppingCart, [class*='cart-item'], .cart-table"
+                ".cart-item, #cart-container, .order-summary, table.cart, #shopping-cart, .shoppingCart, "
+                "[class*='cart-item'], .cart-table, .cart-ticket-item, .cart-header, "
+                "a:has-text('Clear Shopping Cart'), button:has-text('Clear Shopping Cart'), "
+                "a:has-text('Empty Shopping Cart'), button:has-text('Empty Shopping Cart'), "
+                "a:has-text('Clear Cart'), button:has-text('Clear Cart'), "
+                "a:has-text('Checkout'), button:has-text('Checkout')"
             ).first
-            if await cart_elem.is_visible(timeout=1200):
+            if await cart_elem.is_visible(timeout=2500):
                 return True, selected_qty, "Успешно добавлено в корзину"
         except Exception:
             pass
+
+        # Final check if page navigated to cart
+        if await self.detector.is_cart_page(page):
+            return True, selected_qty, "Успешно добавлено в корзину"
 
         # If neither cart URL nor cart container is confirmed, do NOT report false success!
         return False, 0, "Не удалось подтвердить добавление в корзину (страница корзины не открылась)"
