@@ -33,6 +33,10 @@ class EtixCartHandler:
         Supports Material-UI comboboxes and standard select elements.
         Distinguishes between quantity dropdowns (0, 1, 2...) and price tier dropdowns ('Best Available').
         """
+        # Quick exit if page is blocked or network broken
+        if await self.detector.is_blocked_page(page) or await self.detector.is_bad_proxy_page(page):
+            return []
+
         # If Seating Chart tabs are present, switch to Price Level view
         await self.detector.switch_to_price_level_if_seating_chart(page)
 

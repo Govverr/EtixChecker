@@ -43,7 +43,8 @@ class EtixDetector:
     async def is_adspower_proxy_failure(self, page: Page) -> tuple[bool, str]:
         """Check if AdsPower start page or browser tab displays proxy failure or network error."""
         try:
-            url = (page.url or "").lower()
+            raw_url = page.url if isinstance(getattr(page, "url", None), str) else ""
+            url = raw_url.lower()
             if "chrome-error://" in url or "about:error" in url:
                 return True, "Chrome network error URL"
 
@@ -90,7 +91,8 @@ class EtixDetector:
     async def is_bad_proxy_page(self, page: Page) -> bool:
         """Check if current page loaded Chrome network error or connection failure."""
         try:
-            url = (page.url or "").lower()
+            raw_url = page.url if isinstance(getattr(page, "url", None), str) else ""
+            url = raw_url.lower()
             if "chrome-error://" in url or "about:error" in url:
                 return True
 
@@ -122,6 +124,10 @@ class EtixDetector:
         Waits for tab panel to render ticket controls.
         """
         try:
+            # Fast pre-check: if page is blocked or network broken, do not wait for tabs
+            if await self.is_blocked_page(page) or await self.is_bad_proxy_page(page):
+                return False
+
             # If the page already has visible ticket selectors and no tabs, return immediately
             has_direct_controls = await page.locator(
                 ".smoketest-ticket-quantity [role='combobox'], select[name*='quantity']"
@@ -296,7 +302,7 @@ class EtixDetector:
     async def is_blocked_page(self, page: Page) -> bool:
         """Check whether DataDome returned 'Access Temporarily Blocked' in main page or any iframe."""
         try:
-            # Check page title first
+            # Check page title first (instant)
             title = await page.title()
             for pattern in self.config.blocked_text_patterns:
                 if re.search(pattern, title, flags=re.I):
@@ -304,10 +310,21 @@ class EtixDetector:
         except Exception:
             pass
 
+        # Fast selector check for block headers in DOM (<10ms)
+        try:
+            block_hdr = page.locator(
+                "h1:has-text('Access Temporarily Blocked'), h2:has-text('Access Temporarily Blocked'), "
+                "p:has-text('Access Temporarily Blocked'), title:has-text('Access Temporarily Blocked')"
+            ).first
+            if await block_hdr.is_visible(timeout=150):
+                return True
+        except Exception:
+            pass
+
         # Check all frames (main page + iframes)
         for frame in page.frames:
             try:
-                body_text = await frame.inner_text("body", timeout=800)
+                body_text = await frame.inner_text("body", timeout=400)
                 for pattern in self.config.blocked_text_patterns:
                     if re.search(pattern, body_text, flags=re.I):
                         return True
@@ -332,7 +349,7 @@ class EtixDetector:
         # 2. Check for explicit DataDome iframe element in DOM
         try:
             cpt_iframe = page.locator("iframe[src*='captcha-delivery.com'], iframe[src*='datadome'], iframe[title*='DataDome']").first
-            if await cpt_iframe.is_visible(timeout=500):
+            if await cpt_iframe.is_visible(timeout=200):
                 return True
         except Exception:
             pass
@@ -340,41 +357,35 @@ class EtixDetector:
         # 3. Text patterns check across all frames
         for frame in page.frames:
             try:
-                body_text = await frame.inner_text("body", timeout=800)
+                body_text = await frame.inner_text("body", timeout=400)
                 for pattern in self.config.slider_captcha_patterns:
                     if re.search(pattern, body_text, flags=re.I):
                         return True
             except Exception:
                 continue
 
-        # 4. Visible slider handle selectors check across all frames
-        slider_selectors = [
-            "[role='slider']",
-            ".slider-button",
-            "#sec-slider",
-            ".sec-slider-btn",
-            ".slider",
-            ".geetest_slider_button",
-            "#sec-slider-btn",
-            ".captcha-slider-btn",
-            "div.sliderBtn",
-            "#slider",
-            ".tc-slider-normal",
-        ]
-        for sel in slider_selectors:
+        # 4. Visible slider handle selectors check (single unified query across main page and iframes)
+        slider_union = (
+            "[role='slider'], .slider-button, #sec-slider, .sec-slider-btn, "
+            ".slider, .geetest_slider_button, #sec-slider-btn, .captcha-slider-btn, "
+            "div.sliderBtn, #slider, .tc-slider-normal"
+        )
+        try:
+            loc = page.locator(slider_union).first
+            if await loc.is_visible(timeout=200):
+                return True
+        except Exception:
+            pass
+
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
             try:
-                loc = page.locator(sel).first
-                if await loc.is_visible(timeout=300):
+                f_loc = frame.locator(slider_union).first
+                if await f_loc.is_visible(timeout=200):
                     return True
             except Exception:
                 continue
-            for frame in page.frames:
-                try:
-                    f_loc = frame.locator(sel).first
-                    if await f_loc.is_visible(timeout=300):
-                        return True
-                except Exception:
-                    continue
 
         return False
 

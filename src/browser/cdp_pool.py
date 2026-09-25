@@ -335,7 +335,7 @@ class CDPBrowserPool:
 
             # 2. Close failing browser
             try:
-                await failing_worker.browser.close()
+                await asyncio.wait_for(failing_worker.browser.close(), timeout=2.5)
             except Exception:
                 pass
             try:
@@ -403,7 +403,7 @@ class CDPBrowserPool:
                 f"Stopping and removing worker #{worker.worker_index} ({worker.profile.name}, {worker.profile.user_id}). Reason: {reason}"
             )
             try:
-                await worker.browser.close()
+                await asyncio.wait_for(worker.browser.close(), timeout=2.5)
             except Exception:
                 pass
             try:

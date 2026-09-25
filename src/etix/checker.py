@@ -726,16 +726,12 @@ class EtixCheckEngine:
                             wait_until="domcontentloaded",
                             timeout=self.config.nav_timeout,
                         )
-                        await human_sleep((300, 600))
-                        await accept_cookies_if_present(current_worker.page)
-                        await close_blocking_popups(current_worker.page)
-                        await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
                     except Exception as nav_exc:
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] Navigation error on {current_worker.profile.name}: {nav_exc}"
                         )
 
-                # 3. Check for Bad Proxy page (Chrome network error)
+                # 3. FAST-PATH Pre-check: Bad Proxy (Chrome network error)
                 if await self.detector.is_bad_proxy_page(current_worker.page):
                     LOGGER.warning(
                         f"[Worker #{current_worker.worker_index}] Chrome network error / bad proxy on '{current_worker.profile.name}'."
@@ -760,8 +756,11 @@ class EtixCheckEngine:
                         await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Bad proxy and swaps exhausted")
                     return None
 
-                # 4. Check for DataDome slider captcha first
-                if await self.detector.is_slider_captcha(current_worker.page):
+                # 4. FAST-PATH Pre-check: DataDome Hard Block & Slider
+                is_blocked = await self.detector.is_blocked_page(current_worker.page)
+                is_slider = not is_blocked and await self.detector.is_slider_captcha(current_worker.page)
+
+                if is_slider:
                     LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider detected. Solving...")
                     solved = await solve_datadome_slider(current_worker.page)
                     if (
@@ -770,7 +769,7 @@ class EtixCheckEngine:
                         and not await self.detector.is_slider_captcha(current_worker.page)
                     ):
                         LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider solved! Waiting for session sync...")
-                        await human_sleep((1000, 1800))
+                        await human_sleep((600, 1000))
                         curr_u = (current_worker.page.url or "").lower()
                         if "captcha" in curr_u or "datadome" in curr_u or (perf_id and perf_id not in curr_u):
                             LOGGER.info(f"[Worker #{current_worker.worker_index}] Navigating back to event URL {show.url} after solving captcha...")
@@ -780,44 +779,44 @@ class EtixCheckEngine:
                                     wait_until="domcontentloaded",
                                     timeout=self.config.nav_timeout,
                                 )
-                                await human_sleep((400, 800))
-                                await accept_cookies_if_present(current_worker.page)
-                                await close_blocking_popups(current_worker.page)
                             except Exception as re_nav_err:
                                 LOGGER.warning(f"[Worker #{current_worker.worker_index}] Post-captcha navigation warning: {re_nav_err}")
+                        is_blocked = await self.detector.is_blocked_page(current_worker.page)
+                        is_slider = not is_blocked and await self.detector.is_slider_captcha(current_worker.page)
+                    else:
+                        is_blocked = await self.detector.is_blocked_page(current_worker.page)
+                        is_slider = True
 
                 # 5. Check if blocked (DataDome "Access Temporarily Blocked" or unsolved slider)
-                if (
-                    await self.detector.is_blocked_page(current_worker.page)
-                    or await self.detector.is_slider_captcha(current_worker.page)
-                ):
+                if is_blocked or is_slider:
                     LOGGER.warning(
                         f"[Worker #{current_worker.worker_index}] DataDome block/captcha active on '{current_worker.profile.name}'. "
-                        f"Executing exactly 1 reload attempt with cookie reset..."
+                        f"Executing fast 1 reload attempt with cookie reset..."
                     )
                     try:
                         await current_worker.context.clear_cookies()
-                        await human_sleep((600, 1200))
+                        await human_sleep((100, 200))
                         await current_worker.page.goto(
                             show.url,
                             wait_until="domcontentloaded",
-                            timeout=self.config.nav_timeout,
+                            timeout=min(self.config.nav_timeout, 10000),
                         )
-                        await human_sleep((400, 800))
-                        await accept_cookies_if_present(current_worker.page)
-                        await close_blocking_popups(current_worker.page)
                     except Exception as reload_err:
                         LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
 
-                    # If slider appears after reload, give it 1 solve attempt
-                    if await self.detector.is_slider_captcha(current_worker.page):
-                        await solve_datadome_slider(current_worker.page)
+                    # Immediate check if STILL blocked after 1 reload
+                    still_blocked = await self.detector.is_blocked_page(current_worker.page)
+                    still_slider = not still_blocked and await self.detector.is_slider_captcha(current_worker.page)
 
-                    # Check if STILL blocked after 1 reload
-                    if (
-                        await self.detector.is_blocked_page(current_worker.page)
-                        or await self.detector.is_slider_captcha(current_worker.page)
-                    ):
+                    # If slider appears after reload, give it 1 solve attempt
+                    if still_slider:
+                        LOGGER.info(f"[Worker #{current_worker.worker_index}] Slider challenge appeared after reload. Attempting solve...")
+                        await solve_datadome_slider(current_worker.page)
+                        still_blocked = await self.detector.is_blocked_page(current_worker.page)
+                        still_slider = not still_blocked and await self.detector.is_slider_captcha(current_worker.page)
+
+                    if still_blocked or still_slider:
+                        reason = "DataDome block after 1 reload" if still_blocked else "Unsolved DataDome slider after 1 reload"
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] Profile '{current_worker.profile.name}' (ID: {current_worker.profile.user_id}) "
                             f"STILL BLOCKED after 1 reload."
@@ -841,7 +840,7 @@ class EtixCheckEngine:
                             )
                             new_w = await self.cdp_pool.replace_worker_with_reserve(
                                 current_worker,
-                                reason="DataDome block after 1 reload"
+                                reason=reason
                             )
                             if new_w:
                                 current_worker = new_w
@@ -866,7 +865,14 @@ class EtixCheckEngine:
                             f"[Worker #{current_worker.worker_index}] Block on '{current_worker.profile.name}' successfully cleared after 1 reload!"
                         )
 
-                # 6. Check if page reached Sold Out or Sales Ended
+                # 6. Hydrate and prepare page controls (only if NOT blocked)
+                if needs_nav or is_blocked or is_slider:
+                    await human_sleep((100, 300))
+                    await accept_cookies_if_present(current_worker.page)
+                    await close_blocking_popups(current_worker.page)
+                    await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
+
+                # 7. Check if page reached Sold Out or Sales Ended
                 if (
                     await self.detector.is_soldout_page(current_worker.page)
                     or await self.detector.is_event_ended_page(current_worker.page)
@@ -876,7 +882,7 @@ class EtixCheckEngine:
                     )
                     return current_worker
 
-                # 7. Verify Ticket Controls & DOM Readiness
+                # 8. Verify Ticket Controls & DOM Readiness
                 await close_blocking_popups(current_worker.page)
                 await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
 
