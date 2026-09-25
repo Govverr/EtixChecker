@@ -10,6 +10,7 @@ from playwright.async_api import Page, Locator
 from src.browser.human_actions import (
     accept_cookies_if_present,
     close_blocking_popups,
+    handle_empty_shopping_cart_conflict,
     human_sleep,
     is_recaptcha_challenge_visible,
     solve_recaptcha_challenge,
@@ -36,6 +37,10 @@ class EtixCartHandler:
         # Quick exit if page is blocked or network broken
         if await self.detector.is_blocked_page(page) or await self.detector.is_bad_proxy_page(page):
             return []
+
+        # If tax scheme conflict dialogue is present, resolve it immediately by clicking 'Empty Shopping Cart'
+        if await self.detector.is_tax_scheme_conflict(page):
+            await handle_empty_shopping_cart_conflict(page)
 
         # If Seating Chart tabs are present, switch to Price Level view
         await self.detector.switch_to_price_level_if_seating_chart(page)
@@ -498,6 +503,17 @@ class EtixCartHandler:
                     LOGGER.warning(f"Error during reCAPTCHA page reload retry: {retry_err}")
                     return False, 0, f"Ошибка при повторной попытке после капчи: {retry_err}"
 
+        # Check for venue tax scheme conflict dialogue
+        if await self.detector.is_tax_scheme_conflict(page):
+            LOGGER.warning("Tax scheme conflict detected after clicking Add Tickets. Emptying cart and retrying...")
+            if await handle_empty_shopping_cart_conflict(page):
+                add_btn_retry = await self.find_add_button(page)
+                if add_btn_retry:
+                    await add_btn_retry.click(timeout=self.config.click_timeout)
+                    await human_sleep((1500, 3000))
+                    if await self.detector.is_cart_page(page):
+                        return True, selected_qty, "Успешно добавлено в корзину"
+
         # Check for inventory exhaustion or per-order limit error message
         try:
             alert_selectors = [
@@ -575,8 +591,10 @@ class EtixCartHandler:
 
         page.once("dialog", handle_dialog)
 
-        # 1. Primary priority: 'Clear Shopping Cart' button/link
+        # 1. Primary priority: 'Empty Shopping Cart' / 'Clear Shopping Cart' button/link
         bulk_clear_selectors = [
+            "a:has-text('Empty Shopping Cart')",
+            "button:has-text('Empty Shopping Cart')",
             "a:has-text('Clear Shopping Cart')",
             "button:has-text('Clear Shopping Cart')",
             "a:has-text('Clear Cart')",

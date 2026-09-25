@@ -124,8 +124,8 @@ class EtixDetector:
         Waits for tab panel to render ticket controls.
         """
         try:
-            # Fast pre-check: if page is blocked or network broken, do not wait for tabs
-            if await self.is_blocked_page(page) or await self.is_bad_proxy_page(page):
+            # Fast pre-check: if page is blocked, network broken, or in tax scheme conflict, do not wait for tabs
+            if await self.is_blocked_page(page) or await self.is_bad_proxy_page(page) or await self.is_tax_scheme_conflict(page):
                 return False
 
             # If the page already has visible ticket selectors and no tabs, return immediately
@@ -407,5 +407,17 @@ class EtixDetector:
                 ".cart-item, #cart-container, .order-summary, table.cart, #shopping-cart, .shoppingCart"
             ).first.is_visible(timeout=500)
             return bool(has_cart_elem)
+        except Exception:
+            return False
+
+    async def is_tax_scheme_conflict(self, page: Page) -> bool:
+        """Check whether page displays Etix tax scheme conflict / empty cart error."""
+        try:
+            loc = page.locator(
+                "a:has-text('Empty Shopping Cart'), "
+                "text=/different tax scheme/i, "
+                "text=/tax scheme with the venue in cart/i"
+            ).first
+            return await loc.is_visible(timeout=250)
         except Exception:
             return False

@@ -17,6 +17,7 @@ from src.browser.cdp_pool import BrowserWorker, CDPBrowserPool
 from src.browser.human_actions import (
     accept_cookies_if_present,
     close_blocking_popups,
+    handle_empty_shopping_cart_conflict,
     human_sleep,
     solve_datadome_slider,
 )
@@ -289,6 +290,7 @@ class EtixCheckEngine:
             await human_sleep((300, 600))
             await accept_cookies_if_present(primary_worker.page)
             await close_blocking_popups(primary_worker.page)
+            await handle_empty_shopping_cart_conflict(primary_worker.page, target_url=show.url)
 
             # Switch to Price Level IMMEDIATELY if Seating Chart tabs are present
             await self.detector.switch_to_price_level_if_seating_chart(primary_worker.page)
@@ -314,6 +316,7 @@ class EtixCheckEngine:
                         await human_sleep((500, 1000))
                         await accept_cookies_if_present(primary_worker.page)
                         await close_blocking_popups(primary_worker.page)
+                        await handle_empty_shopping_cart_conflict(primary_worker.page, target_url=show.url)
                     except Exception as retry_exc:
                         LOGGER.error(f"Navigation failed again after primary hot-swap: {retry_exc}")
                         return CheckResult(
@@ -870,6 +873,7 @@ class EtixCheckEngine:
                     await human_sleep((100, 300))
                     await accept_cookies_if_present(current_worker.page)
                     await close_blocking_popups(current_worker.page)
+                    await handle_empty_shopping_cart_conflict(current_worker.page, target_url=show.url)
                     await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
 
                 # 7. Check if page reached Sold Out or Sales Ended
@@ -884,6 +888,7 @@ class EtixCheckEngine:
 
                 # 8. Verify Ticket Controls & DOM Readiness
                 await close_blocking_popups(current_worker.page)
+                await handle_empty_shopping_cart_conflict(current_worker.page, target_url=show.url)
                 await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
 
                 try:
@@ -926,6 +931,7 @@ class EtixCheckEngine:
                         await human_sleep((500, 1000))
                         await accept_cookies_if_present(current_worker.page)
                         await close_blocking_popups(current_worker.page)
+                        await handle_empty_shopping_cart_conflict(current_worker.page, target_url=show.url)
                     except Exception:
                         pass
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import random
+import re
 from typing import List, Optional, Tuple
 from playwright.async_api import Frame, Page, Locator
 
@@ -95,6 +96,139 @@ async def close_blocking_popups(page: Page, timeout_ms: int = 1500) -> None:
             await asyncio.sleep(0.2)
     except Exception:
         pass
+
+    # Extra check: Etix venue tax scheme cart conflict
+    try:
+        await handle_empty_shopping_cart_conflict(page, timeout_ms=250)
+    except Exception:
+        pass
+
+
+def _extract_perf_id(url: str) -> Optional[str]:
+    """Extract performance ID from URL."""
+    m = re.search(r"/(?:p|e)/(\d+)", url, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"performance_id=(\d+)", url, re.I)
+    if m:
+        return m.group(1)
+    return None
+
+
+async def handle_empty_shopping_cart_conflict(
+    page: Page,
+    target_url: Optional[str] = None,
+    timeout_ms: int = 1500,
+) -> bool:
+    """
+    Detect and resolve Etix venue tax scheme conflict:
+    'You requested venue has different tax scheme with the venue in cart.
+     Please click the button to go back, or click the link of View Shopping Cart to view shopping cart info,
+     or click the link of Empty Shopping Cart to remove the tickets from your cart and select another performance or package to buy tickets.'
+    
+    Clicks 'Empty Shopping Cart' link to clear the cart and proceed to the site.
+    """
+    try:
+        empty_cart_union = (
+            "a:has-text('Empty Shopping Cart'), "
+            "a:has-text('Empty shopping cart'), "
+            "button:has-text('Empty Shopping Cart'), "
+            "a[href*='emptyShoppingCart'], "
+            "a[href*='emptyCart']"
+        )
+        empty_cart_link = page.locator(empty_cart_union).first
+        is_link_visible = False
+        try:
+            is_link_visible = await empty_cart_link.is_visible(timeout=timeout_ms)
+        except Exception:
+            pass
+
+        tax_conflict_visible = False
+        if not is_link_visible:
+            try:
+                tax_text = page.locator(
+                    "text=/different tax scheme/i, text=/tax scheme with the venue in cart/i"
+                ).first
+                tax_conflict_visible = await tax_text.is_visible(timeout=300)
+            except Exception:
+                pass
+
+        if not is_link_visible and not tax_conflict_visible:
+            return False
+
+        LOGGER.warning(
+            "Detected Etix venue tax scheme / cart conflict ('different tax scheme with the venue in cart'). "
+            "Clicking 'Empty Shopping Cart' to clear cart and enter site..."
+        )
+
+        # Auto-accept JavaScript confirmation dialogs if triggered by click
+        def _handle_dialog(dialog):
+            asyncio.create_task(dialog.accept())
+
+        page.once("dialog", _handle_dialog)
+
+        clicked = False
+        if is_link_visible:
+            try:
+                await empty_cart_link.click(timeout=3000)
+                clicked = True
+            except Exception as click_err:
+                LOGGER.debug(f"Direct click on 'Empty Shopping Cart' link failed: {click_err}")
+
+        if not clicked:
+            try:
+                fallback_loc = page.locator("text='Empty Shopping Cart'").first
+                if await fallback_loc.is_visible(timeout=1000):
+                    await fallback_loc.click(timeout=3000)
+                    clicked = True
+            except Exception:
+                pass
+
+        if not clicked:
+            try:
+                href_loc = page.locator("a[href*='empty']").first
+                if await href_loc.is_visible(timeout=1000):
+                    await href_loc.click(timeout=3000)
+                    clicked = True
+            except Exception:
+                pass
+
+        if not clicked:
+            LOGGER.error("Failed to click 'Empty Shopping Cart' link on tax scheme conflict page.")
+            return False
+
+        # Wait for page navigation and DOM hydration
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=7000)
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+
+        # Edge-case safety: ensure page lands on target show URL
+        if target_url:
+            curr_url = page.url.lower()
+            perf_id = _extract_perf_id(target_url)
+            on_target = False
+            if perf_id and (f"/p/{perf_id}" in curr_url or f"/{perf_id}" in curr_url or perf_id in curr_url):
+                on_target = True
+            elif target_url.lower() in curr_url:
+                on_target = True
+
+            if not on_target:
+                try:
+                    body_lower = (await page.inner_text("body", timeout=1000)).lower()
+                    if "tax scheme" in body_lower or "cart" in curr_url or "empty" in curr_url:
+                        LOGGER.info(f"Navigating to target event URL after emptying cart: {target_url}...")
+                        await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                        await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+
+        LOGGER.info("Cleared cart and entered site successfully via 'Empty Shopping Cart'.")
+        return True
+    except Exception as exc:
+        LOGGER.warning(f"Exception while handling tax scheme cart conflict: {exc}")
+        return False
 
 
 def _generate_bezier_points(
