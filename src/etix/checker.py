@@ -283,13 +283,17 @@ class EtixCheckEngine:
                 wait_until="domcontentloaded",
                 timeout=self.config.nav_timeout,
             )
-            await human_sleep((500, 1000))
+            await human_sleep((300, 600))
             await accept_cookies_if_present(primary_worker.page)
             await close_blocking_popups(primary_worker.page)
+
+            # Switch to Price Level IMMEDIATELY if Seating Chart tabs are present
+            await self.detector.switch_to_price_level_if_seating_chart(primary_worker.page)
+
             try:
                 await primary_worker.page.wait_for_selector(
-                    "select, button:has-text('Add Tickets'), input[value*='Add Tickets'], div[role='alert']",
-                    timeout=15000,
+                    ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select, button:has-text('Add Tickets'), input[value*='Add Tickets'], div[role='alert']",
+                    timeout=3500,
                 )
             except Exception:
                 pass
@@ -551,6 +555,8 @@ class EtixCheckEngine:
                     self.profile_manager.record_good_proxy(worker.profile.proxy_key)
                 else:
                     details_list.append(f"[{w_tag}] {msg}")
+                    if "капч" in msg.lower() or "recaptcha" in msg.lower() or "blocked" in msg.lower():
+                        self.profile_manager.record_blocked_profile(worker.profile, f"Add to Cart blocked: {msg}")
             elif isinstance(res, Exception):
                 details_list.append(f"[{w_tag}] Ошибка: {res}")
             else:
@@ -717,9 +723,10 @@ class EtixCheckEngine:
                             wait_until="domcontentloaded",
                             timeout=self.config.nav_timeout,
                         )
-                        await human_sleep((400, 800))
+                        await human_sleep((300, 600))
                         await accept_cookies_if_present(current_worker.page)
                         await close_blocking_popups(current_worker.page)
+                        await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
                     except Exception as nav_exc:
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] Navigation error on {current_worker.profile.name}: {nav_exc}"
@@ -868,11 +875,12 @@ class EtixCheckEngine:
 
                 # 7. Verify Ticket Controls & DOM Readiness
                 await close_blocking_popups(current_worker.page)
+                await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
 
                 try:
                     await current_worker.page.wait_for_selector(
                         ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select, button:has-text('Add Tickets'), input[value*='Add Tickets'], div[role='alert']",
-                        timeout=5000,
+                        timeout=3000,
                     )
                 except Exception:
                     pass

@@ -115,37 +115,92 @@ class EtixDetector:
         except Exception:
             return False
 
-    async def switch_to_price_level_if_seating_chart(self, page: Page) -> bool:
+    async def switch_to_price_level_if_seating_chart(self, page: Page, wait_timeout_ms: int = 7000) -> bool:
         """
         Check if the page has both 'Seating Chart' and 'Price Level' tabs.
         If present and not yet active, switch to 'Price Level' tab to reveal ticket selectors.
-        Waits 300-600ms for dynamic rendering.
+        Waits for tab panel to render ticket controls.
         """
         try:
-            pl_loc = page.locator("a:has-text('Price Level'), button:has-text('Price Level'), [role='tab']:has-text('Price Level')").first
-            sc_loc = page.locator("a:has-text('Seating Chart'), button:has-text('Seating Chart'), [role='tab']:has-text('Seating Chart')").first
+            # If the page already has visible ticket selectors and no tabs, return immediately
+            has_direct_controls = await page.locator(
+                ".smoketest-ticket-quantity [role='combobox'], select[name*='quantity']"
+            ).first.is_visible()
+            if has_direct_controls and not await page.locator("a.ui-tabs-anchor:has-text('Price Level')").first.is_visible():
+                return False
 
-            if await pl_loc.is_visible(timeout=400) and await sc_loc.is_visible(timeout=400):
-                is_active = await pl_loc.evaluate("""el => {
-                    const p = el.parentElement;
-                    return el.classList.contains('active') ||
-                           el.classList.contains('selected') ||
-                           el.getAttribute('aria-selected') === 'true' ||
-                           (p && (p.classList.contains('active') || p.classList.contains('selected')));
-                }""")
-                if not is_active:
-                    LOGGER.info("Detected Seating Chart / Price Level tabs. Switching to 'Price Level' view...")
-                    try:
-                        await pl_loc.scroll_into_view_if_needed(timeout=1000)
-                    except Exception:
-                        pass
-                    await pl_loc.click()
-                    await asyncio.sleep(0.4)
-                    LOGGER.info("Switched to 'Price Level' tab successfully.")
-                    return True
+            pl_loc = page.locator(
+                "a.ui-tabs-anchor:has-text('Price Level'), a:has-text('Price Level'), "
+                "button:has-text('Price Level'), [role='tab']:has-text('Price Level'), "
+                "li:has-text('Price Level')"
+            ).first
+            sc_loc = page.locator(
+                "a.ui-tabs-anchor:has-text('Seating Chart'), a:has-text('Seating Chart'), "
+                "button:has-text('Seating Chart'), [role='tab']:has-text('Seating Chart'), "
+                "li:has-text('Seating Chart')"
+            ).first
+
+            # Robust wait for tabs to mount in DOM
+            tabs_found = False
+            try:
+                if hasattr(pl_loc, "wait_for"):
+                    await pl_loc.wait_for(state="visible", timeout=wait_timeout_ms)
+                if hasattr(sc_loc, "wait_for"):
+                    await sc_loc.wait_for(state="visible", timeout=1500)
+                tabs_found = True
+            except Exception:
+                pass
+
+            if not tabs_found:
+                try:
+                    if await pl_loc.is_visible() and await sc_loc.is_visible():
+                        tabs_found = True
+                except Exception:
+                    pass
+
+            if not tabs_found:
+                return False
+
+            is_active = await pl_loc.evaluate("""el => {
+                const li = el.closest('li') || el.parentElement || el;
+                return li.classList.contains('ui-state-active') ||
+                       li.classList.contains('ui-tabs-selected') ||
+                       li.classList.contains('active') ||
+                       li.classList.contains('selected') ||
+                       el.getAttribute('aria-selected') === 'true';
+            }""")
+            if not is_active:
+                LOGGER.info("Detected Seating Chart / Price Level tabs. Switching to 'Price Level' view...")
+                try:
+                    await pl_loc.scroll_into_view_if_needed(timeout=1000)
+                except Exception:
+                    pass
+                await pl_loc.click()
+
+                # Wait for tab panel to render ticket controls
+                try:
+                    await page.wait_for_selector(
+                        ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select, button:has-text('Add Tickets')",
+                        timeout=2500,
+                    )
+                except Exception:
+                    await asyncio.sleep(0.5)
+
+                LOGGER.info("Switched to 'Price Level' tab successfully.")
+                return True
+            else:
+                return True
         except Exception as exc:
             LOGGER.debug(f"Price Level tab check: {exc}")
         return False
+
+    async def is_recaptcha_challenge_present(self, page: Page) -> bool:
+        """Check whether a Google reCAPTCHA v2 challenge popup is currently active."""
+        try:
+            from src.browser.human_actions import is_recaptcha_challenge_visible
+            return await is_recaptcha_challenge_visible(page)
+        except Exception:
+            return False
 
     async def has_active_ticket_controls(self, page: Page) -> bool:
         """Check whether page has visible, active ticket quantity selectors."""

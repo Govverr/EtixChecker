@@ -11,6 +11,9 @@ from src.browser.human_actions import (
     accept_cookies_if_present,
     close_blocking_popups,
     human_sleep,
+    is_recaptcha_challenge_visible,
+    solve_recaptcha_challenge,
+    solve_datadome_slider,
 )
 from src.config.settings import AppConfig
 from src.etix.detector import EtixDetector
@@ -429,8 +432,67 @@ class EtixCartHandler:
                     return False, 0, f"Ошибка клика 'Add Tickets': {exc}"
 
 
-        # Wait for navigation or cart confirmation
-        await human_sleep((1500, 3000))
+        # Wait dynamically for navigation, cart confirmation, or captcha challenge
+        deadline = asyncio.get_event_loop().time() + 6.0
+        while asyncio.get_event_loop().time() < deadline:
+            if await self.detector.is_cart_page(page):
+                break
+            if await is_recaptcha_challenge_visible(page):
+                break
+            if await self.detector.is_slider_captcha(page) or await self.detector.is_blocked_page(page):
+                break
+            try:
+                alert_elem = page.locator("div[role='alert'], .alert-danger, .error-message").first
+                if await alert_elem.is_visible(timeout=100):
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+        # Check if DataDome slider appeared upon clicking Add Tickets
+        if await self.detector.is_slider_captcha(page):
+            LOGGER.info("DataDome slider challenge appeared upon clicking 'Add Tickets'. Solving...")
+            await solve_datadome_slider(page)
+            await human_sleep((1000, 1500))
+
+        # Check if Google reCAPTCHA v2 challenge appeared!
+        if await is_recaptcha_challenge_visible(page):
+            LOGGER.warning("reCAPTCHA challenge detected upon clicking 'Add Tickets'!")
+            solved, reason = await solve_recaptcha_challenge(page)
+            if not solved:
+                LOGGER.warning(
+                    f"reCAPTCHA not resolved on initial solve attempt ({reason}). "
+                    f"Step 3: Reloading page and retrying full add-to-cart solve cycle once..."
+                )
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=self.config.nav_timeout)
+                    await human_sleep((500, 1000))
+                    await accept_cookies_if_present(page, timeout_ms=300)
+                    await close_blocking_popups(page, timeout_ms=300)
+                    await self.detector.switch_to_price_level_if_seating_chart(page)
+
+                    retry_ctrl = await self.find_ticket_select(page, ticket_index)
+                    if retry_ctrl:
+                        r_tag = await retry_ctrl.evaluate("el => el.tagName.toLowerCase()")
+                        if r_tag == "select":
+                            await self._robust_select_quantity(retry_ctrl, requested_qty)
+                        else:
+                            await self._select_mui_combobox_quantity(page, retry_ctrl, requested_qty)
+
+                        await human_sleep(self.config.after_click_sleep_ms)
+                        r_add_btn = await self.find_add_button(page)
+                        if r_add_btn:
+                            await r_add_btn.click(timeout=self.config.click_timeout)
+                            await human_sleep((1000, 2000))
+                            if await is_recaptcha_challenge_visible(page):
+                                LOGGER.info("reCAPTCHA challenge appeared again after reload. Repeating solve sequence...")
+                                solved_retry, reason_retry = await solve_recaptcha_challenge(page)
+                                if not solved_retry:
+                                    LOGGER.error("reCAPTCHA could not be resolved after page reload retry.")
+                                    return False, 0, f"Заблокировано капчей (reCAPTCHA: {reason_retry})"
+                except Exception as retry_err:
+                    LOGGER.warning(f"Error during reCAPTCHA page reload retry: {retry_err}")
+                    return False, 0, f"Ошибка при повторной попытке после капчи: {retry_err}"
 
         # Check for inventory exhaustion or per-order limit error message
         try:
