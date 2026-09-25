@@ -240,12 +240,16 @@ class AdsPowerProfileManager:
 
     def get_next_available_reserve(self) -> Optional[AdsPowerProfile]:
         """
-        Get an unallocated reserve profile STRICTLY from target group 'Inventory Etix (DO NOT TOUCH)',
+        Get an unallocated reserve profile from the current loaded pool,
         randomly chosen, and mark it IN_USE.
         """
+        target_group = getattr(self, "group_name", None)
+        is_all_groups = not target_group or target_group.strip().lower() in (
+            "все группы", "all groups", "all", "все", ""
+        )
         available = [
             p for p in self.profiles
-            if p.group_name == getattr(self, "group_name", "Inventory Etix (DO NOT TOUCH)")
+            if (is_all_groups or not p.group_name or p.group_name.strip().lower() == target_group.strip().lower())
             and p.role in (ProfileRole.RESERVE, ProfileRole.ACTIVE)
             and p.role not in (ProfileRole.IN_USE, ProfileRole.BUSY_EXTERNAL, ProfileRole.FAILED, ProfileRole.DISABLED)
         ]

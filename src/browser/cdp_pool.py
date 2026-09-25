@@ -318,10 +318,14 @@ class CDPBrowserPool:
         self,
         failing_worker: BrowserWorker,
         reason: str = "DataDome block",
+        max_attempts: Optional[int] = None,
     ) -> Optional[BrowserWorker]:
         """
         Close a failing worker, mark its proxy bad for this session,
-        allocate a reserve profile with a clean good proxy, and start a new worker.
+        allocate a reserve profile with native AdsPower settings, and start a new worker.
+        If a reserve candidate fails to launch (e.g. missing SunBrowser kernel) or fails
+        the pre-flight health check, continues trying subsequent available reserve profiles
+        until a healthy worker is connected or reserves are exhausted.
         """
         async with self._lock:
             LOGGER.warning(
@@ -344,54 +348,81 @@ class CDPBrowserPool:
                 pass
             failing_worker.profile.is_open = False
 
-            # 3. Find next reserve profile strictly from target group
-            reserve_prof = self.profile_manager.get_next_available_reserve()
-            if not reserve_prof:
-                LOGGER.error("No reserve profiles available in target group for hot-swap!")
-                if failing_worker in self.workers:
-                    self.workers.remove(failing_worker)
-                return None
+            # 3. Iterate through available reserve profiles until one connects and passes health check
+            profiles_list = getattr(self.profile_manager, "profiles", []) if self.profile_manager else []
+            attempt_limit = max_attempts if max_attempts is not None else max(10, len(profiles_list))
+            attempt = 0
 
-            # 4. Connect new reserve profile directly with native AdsPower settings (Strict Immutability)
-            LOGGER.info(
-                f"Connecting reserve profile '{reserve_prof.name}' ({reserve_prof.user_id}) with native proxy..."
-            )
-            new_worker = await self._connect_profile(reserve_prof, worker_index=failing_worker.worker_index)
-            if not new_worker:
-                LOGGER.error(f"Failed to connect reserve profile {reserve_prof.user_id}")
-                if failing_worker in self.workers:
-                    self.workers.remove(failing_worker)
-                return None
+            while attempt < attempt_limit:
+                attempt += 1
+                reserve_prof = self.profile_manager.get_next_available_reserve()
+                if not reserve_prof:
+                    LOGGER.error(
+                        f"[Worker #{failing_worker.worker_index}] No reserve profiles available in target group for hot-swap (attempt {attempt}/{attempt_limit})!"
+                    )
+                    break
 
-            # 5. Pre-flight health check on new reserve worker
-            is_healthy, status_msg = await self.validate_worker_connection(new_worker, timeout_s=3.0)
-            if not is_healthy:
-                LOGGER.warning(
-                    f"Reserve profile '{reserve_prof.name}' failed health check ({status_msg}). Closing..."
+                LOGGER.info(
+                    f"[Worker #{failing_worker.worker_index}] Trying reserve profile '{reserve_prof.name}' "
+                    f"({reserve_prof.user_id}, attempt {attempt}/{attempt_limit}) with native settings..."
                 )
-                try:
-                    await new_worker.browser.close()
-                except Exception:
-                    pass
-                try:
-                    await self.client.stop_browser(reserve_prof.user_id)
-                except Exception:
-                    pass
-                reserve_prof.is_open = False
-                self.profile_manager.mark_profile_failed(reserve_prof)
+
+                # Connect new reserve profile directly with native AdsPower settings (Strict Immutability)
+                new_worker = await self._connect_profile(reserve_prof, worker_index=failing_worker.worker_index)
+                if not new_worker:
+                    LOGGER.warning(
+                        f"[Worker #{failing_worker.worker_index}] Failed to launch/connect reserve profile "
+                        f"'{reserve_prof.name}' ({reserve_prof.user_id}). Marking failed and trying next reserve candidate..."
+                    )
+                    reserve_prof.is_open = False
+                    self.profile_manager.mark_profile_failed(reserve_prof)
+                    try:
+                        await self.client.stop_browser(reserve_prof.user_id)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # Pre-flight health check on new reserve worker
+                is_healthy, status_msg = await self.validate_worker_connection(new_worker, timeout_s=3.0)
+                if not is_healthy:
+                    LOGGER.warning(
+                        f"[Worker #{failing_worker.worker_index}] Reserve profile '{reserve_prof.name}' "
+                        f"failed health check ({status_msg}). Closing and trying next reserve candidate..."
+                    )
+                    try:
+                        await asyncio.wait_for(new_worker.browser.close(), timeout=2.5)
+                    except Exception:
+                        pass
+                    try:
+                        await self.client.stop_browser(reserve_prof.user_id)
+                    except Exception:
+                        pass
+                    reserve_prof.is_open = False
+                    self.profile_manager.mark_profile_failed(reserve_prof)
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # Successful connection and verified healthy
                 if failing_worker in self.workers:
-                    self.workers.remove(failing_worker)
-                return None
+                    idx = self.workers.index(failing_worker)
+                    self.workers[idx] = new_worker
+                else:
+                    self.workers.append(new_worker)
 
-            # 6. Update workers list
-            if failing_worker in self.workers:
-                idx = self.workers.index(failing_worker)
-                self.workers[idx] = new_worker
+                LOGGER.info(
+                    f"[Worker #{failing_worker.worker_index}] Hot-swap complete! Replaced with profile "
+                    f"'{reserve_prof.name}' ({reserve_prof.user_id})"
+                )
+                return new_worker
 
-            LOGGER.info(
-                f"Hot-swap complete! Worker #{failing_worker.worker_index} is now profile '{reserve_prof.name}' ({reserve_prof.user_id})"
+            # If all reserve candidates failed or pool exhausted
+            LOGGER.error(
+                f"[Worker #{failing_worker.worker_index}] Hot-swap failed: all reserve candidates failed or pool exhausted."
             )
-            return new_worker
+            if failing_worker in self.workers:
+                self.workers.remove(failing_worker)
+            return None
 
     async def stop_and_remove_worker(self, worker: BrowserWorker, reason: str = "") -> None:
         """
