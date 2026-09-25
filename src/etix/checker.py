@@ -128,12 +128,15 @@ class EtixCheckEngine:
         shows: Optional[List[Show]] = None,
         resume: bool = True,
         on_show_done: CallbackType = None,
+        group_name: Optional[str] = None,
     ) -> List[CheckResult]:
         """Execute full checking pipeline across all loaded shows (or specific selected shows)."""
         if shows is None:
             shows = self.load_shows(shows_csv)
         if not shows:
             return []
+
+        target_group = group_name or self.config.adspower_group_name
 
         # Sync good proxies from remote source (e.g. GitHub Raw / Gist) if configured
         sync_url = os.getenv("GOOD_PROXIES_SYNC_URL", None)
@@ -149,11 +152,11 @@ class EtixCheckEngine:
 
         # Load and organize dynamic profile pool with concurrency detection
         profiles = await self.profile_manager.load_and_organize_profiles(
-            group_name=self.config.adspower_group_name,
+            group_name=target_group,
         )
         if not profiles:
             raise RuntimeError(
-                f"В группе AdsPower '{self.config.adspower_group_name}' не найдено ни одного профиля!"
+                f"В группе AdsPower '{target_group}' не найдено ни одного профиля!"
             )
 
         free_profiles = self.profile_manager.get_available_free_profiles()
@@ -182,7 +185,7 @@ class EtixCheckEngine:
                 if busy_profiles else ""
             )
             raise RuntimeError(
-                f"Недостаточно свободных профилей в группе '{self.config.adspower_group_name}'.\n"
+                f"Недостаточно свободных профилей в группе '{target_group}'.\n"
                 f"Требуется для проверки: {profiles_count_to_start} профилей.\n"
                 f"Свободно в группе: {len(free_profiles)} профилей.{busy_details}\n"
                 f"Пожалуйста, закройте открытые профили в AdsPower или добавьте новые свободные профили в группу."
@@ -199,7 +202,7 @@ class EtixCheckEngine:
         if not workers:
             raise RuntimeError(
                 f"Фатальная ошибка: 0 рабочих профилей. Все проверенные профили в группе "
-                f"'{self.config.adspower_group_name}' имеют нерабочие прокси (Proxy failure). "
+                f"'{target_group}' имеют нерабочие прокси (Proxy failure). "
                 f"Проверьте статус прокси в AdsPower."
             )
         if len(workers) < profiles_count_to_start:

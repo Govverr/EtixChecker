@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import math
 import os
 import queue
@@ -310,6 +311,7 @@ class EtixGuiApp(ctk.CTk):
         self.profile_manager = AdsPowerProfileManager(client=self.client)
         self.backup_service = ProfileBackupService()
         self.update_service = UpdateService()
+        self.current_group_name: str = CONFIG.adspower_group_name
         self.show_cards: Dict[str, ShowCardWidget] = {}
 
         self._build_ui()
@@ -947,7 +949,9 @@ class EtixGuiApp(ctk.CTk):
 
             # Persist and reload
             save_delays_to_dotenv(updates)
-            new_cfg = reload_config()
+            global CONFIG
+            CONFIG = reload_config()
+            new_cfg = CONFIG
 
             est = estimate_check_duration_seconds(12, new_cfg)
             self.lbl_est_duration.configure(
@@ -1120,7 +1124,7 @@ class EtixGuiApp(ctk.CTk):
                         LOGGER.warning(f"Failed to fetch groups from AdsPower: {g_err}")
 
                     profiles = await self.profile_manager.load_and_organize_profiles(
-                        group_name=CONFIG.adspower_group_name,
+                        group_name=self.current_group_name,
                     )
                     free_count = len(self.profile_manager.get_available_free_profiles())
                     busy_count = len(self.profile_manager.get_busy_external_profiles())
@@ -1149,11 +1153,13 @@ class EtixGuiApp(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_group_selected(self, choice: str) -> None:
-        if not choice or choice == CONFIG.adspower_group_name:
+        if not choice:
             return
+        self.current_group_name = choice
         self._log(f"📁 Переключение на папку профилей: '{choice}'...")
         save_delays_to_dotenv({"ADSPOWER_GROUP_NAME": choice})
-        reload_config()
+        global CONFIG
+        CONFIG = reload_config()
 
         def worker():
             async def run():
@@ -1177,15 +1183,16 @@ class EtixGuiApp(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_backup_clicked(self) -> None:
+        selected_group = self.combo_group.get().strip() if hasattr(self, "combo_group") else self.current_group_name
         def worker():
             async def run():
                 try:
-                    profiles = await self.client.get_profiles_by_group(group_name=CONFIG.adspower_group_name)
+                    profiles = await self.client.get_profiles_by_group(group_name=selected_group)
                     if profiles:
-                        backup_file = self.backup_service.backup_profiles(CONFIG.adspower_group_name, profiles)
+                        backup_file = self.backup_service.backup_profiles(selected_group, profiles)
                         self.event_queue.put(("backup_done", True, str(backup_file)))
                     else:
-                        self.event_queue.put(("backup_done", False, "Профили не найдены"))
+                        self.event_queue.put(("backup_done", False, f"Профили не найдены в группе '{selected_group}'"))
                 except Exception as exc:
                     self.event_queue.put(("backup_done", False, str(exc)))
 
@@ -1206,6 +1213,8 @@ class EtixGuiApp(ctk.CTk):
             return
 
         selected_shows = [c.show for c in selected_cards]
+        selected_group = self.combo_group.get().strip() if hasattr(self, "combo_group") else self.current_group_name
+        self.current_group_name = selected_group
 
         # Pre-flight Concurrency & Profile Sufficiency Check
         self.profile_manager.reset_session_statuses()
@@ -1229,7 +1238,7 @@ class EtixGuiApp(ctk.CTk):
                 "Недостаточно свободных профилей",
                 f"Для проверки выбранных событий требуется: {max_needed_workers} свободных профилей.\n"
                 f"Доступно свободно в группе: {len(free_profiles)} профилей.{busy_details}\n\n"
-                f"Пожалуйста, закройте открытые браузеры в AdsPower или добавьте новые профили в группу '{CONFIG.adspower_group_name}'."
+                f"Пожалуйста, закройте открытые браузеры в AdsPower или добавьте новые профили в группу '{selected_group}'."
             )
             return
 
@@ -1238,7 +1247,7 @@ class EtixGuiApp(ctk.CTk):
         self.stat_status.lbl_val.configure(text="Выполняется...", text_color="#f59e0b")
         self._log("=========================================")
         self._log(
-            f"🚀 Запуск процесса проверки Etix (AdsPower CDP) для {len(selected_cards)} выбранных событий..."
+            f"🚀 Запуск процесса проверки Etix (AdsPower CDP) в папке '{selected_group}' для {len(selected_cards)} выбранных событий..."
         )
 
         # Reset state only for selected cards
@@ -1250,8 +1259,11 @@ class EtixGuiApp(ctk.CTk):
 
         def worker():
             async def run():
+                global CONFIG
+                CONFIG = reload_config()
+                active_cfg = dataclasses.replace(CONFIG, adspower_group_name=selected_group)
                 engine = EtixCheckEngine(
-                    config=CONFIG,
+                    config=active_cfg,
                     client=self.client,
                     profile_manager=self.profile_manager,
                 )
@@ -1261,10 +1273,11 @@ class EtixGuiApp(ctk.CTk):
 
                 try:
                     results = await engine.run(
-                        shows_csv=CONFIG.shows_csv,
+                        shows_csv=active_cfg.shows_csv,
                         shows=selected_shows,
                         resume=True,
                         on_show_done=on_done,
+                        group_name=selected_group,
                     )
                     self.event_queue.put(("check_completed", results))
                 except Exception as exc:
@@ -1342,7 +1355,7 @@ class EtixGuiApp(ctk.CTk):
                     sorted_groups = msg[1]
                     if hasattr(self, "combo_group") and sorted_groups:
                         self.combo_group.configure(values=sorted_groups)
-                        curr = CONFIG.adspower_group_name
+                        curr = getattr(self, "current_group_name", CONFIG.adspower_group_name)
                         if curr in sorted_groups:
                             self.combo_group.set(curr)
                         elif sorted_groups:
