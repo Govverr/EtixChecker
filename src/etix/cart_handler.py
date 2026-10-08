@@ -553,6 +553,29 @@ class EtixCartHandler:
                 except Exception as retry_err:
                     LOGGER.warning(f"Error during reCAPTCHA page reload retry: {retry_err}")
                     return False, 0, f"Ошибка при повторной попытке после капчи: {retry_err}"
+            else:
+                LOGGER.info("reCAPTCHA solved successfully! Awaiting cart redirection...")
+                # Dynamic poll for cart page
+                c_deadline = asyncio.get_event_loop().time() + 12.0
+                while asyncio.get_event_loop().time() < c_deadline:
+                    if await self.detector.is_cart_page(page):
+                        return True, selected_qty, "Успешно добавлено в корзину"
+                    if await self.detector.is_captcha_required_error(page):
+                        break
+                    await asyncio.sleep(0.3)
+
+                # If cart not reached automatically, re-click 'Add Tickets' with solved token
+                if not await self.detector.is_cart_page(page) and not await self.detector.is_captcha_required_error(page):
+                    LOGGER.info("Cart page not reached automatically after solving reCAPTCHA. Clicking 'Add Tickets'...")
+                    r_add_btn = await self.find_add_button(page)
+                    if r_add_btn:
+                        await r_add_btn.click(timeout=self.config.click_timeout)
+                        await human_sleep((1000, 2000))
+                        c_deadline = asyncio.get_event_loop().time() + 12.0
+                        while asyncio.get_event_loop().time() < c_deadline:
+                            if await self.detector.is_cart_page(page):
+                                return True, selected_qty, "Успешно добавлено в корзину"
+                            await asyncio.sleep(0.3)
 
         # Check for venue tax scheme conflict dialogue
         if await self.detector.is_tax_scheme_conflict(page):
@@ -695,6 +718,22 @@ class EtixCartHandler:
         # Final check if page navigated to cart
         if await self.detector.is_cart_page(page):
             return True, selected_qty, "Успешно добавлено в корзину"
+
+        # Safety net: check if reCAPTCHA challenge is still active on the page
+        if await is_recaptcha_challenge_visible(page):
+            LOGGER.warning("reCAPTCHA challenge detected before final cart check. Attempting solve...")
+            solved_end, reason_end = await solve_recaptcha_challenge(page, max_attempts=3)
+            if solved_end:
+                if await self.detector.is_cart_page(page):
+                    return True, selected_qty, "Успешно добавлено в корзину (после решения reCAPTCHA)"
+                r_btn = await self.find_add_button(page)
+                if r_btn:
+                    await r_btn.click(timeout=self.config.click_timeout)
+                    await asyncio.sleep(2.0)
+                    if await self.detector.is_cart_page(page):
+                        return True, selected_qty, "Успешно добавлено в корзину"
+            else:
+                return False, 0, f"Заблокировано капчей (reCAPTCHA: {reason_end})"
 
         # If neither cart URL nor cart container is confirmed, do NOT report false success!
         return False, 0, "Не удалось подтвердить добавление в корзину (страница корзины не открылась)"

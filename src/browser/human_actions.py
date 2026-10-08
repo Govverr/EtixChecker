@@ -614,25 +614,37 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
 
 async def find_recaptcha_challenge_frame(page: Page) -> Optional[Frame]:
-    """Find the active Google reCAPTCHA v2 challenge bframe across page frames."""
+    """Find the active Google reCAPTCHA v2 / Enterprise challenge bframe across page frames."""
+    # 1. Primary check: scan all frames for visible challenge UI elements
+    for frame in page.frames:
+        try:
+            f_url = (frame.url or "").lower()
+            if "recaptcha" in f_url:
+                chal_loc = frame.locator(
+                    "#rc-imageselect, #recaptcha-reload-button, .rc-button-reload, "
+                    "#recaptcha-verify-button, .help-button-holder, #solver-button, "
+                    "#recaptcha-liveness-button, .rc-button-liveness, #recaptcha-audio-button"
+                ).first
+                if await chal_loc.is_visible(timeout=150):
+                    return frame
+        except Exception:
+            continue
+
+    # 2. Check by URL containing bframe or challenge
     for frame in page.frames:
         f_url = (frame.url or "").lower()
         if "recaptcha" in f_url and ("bframe" in f_url or "challenge" in f_url):
             return frame
-        try:
-            btn = frame.locator(
-                "#recaptcha-reload-button, .rc-button-reload, #recaptcha-liveness-button, .rc-button-liveness"
-            ).first
-            if await btn.is_visible(timeout=100):
-                return frame
-        except Exception:
-            continue
 
+    # 3. Check by parent iframe locator in DOM (including enterprise and recaptcha.net)
     try:
         iframe_loc = page.locator(
             "iframe[src*='recaptcha/api2/bframe'], "
             "iframe[src*='recaptcha/enterprise/bframe'], "
-            "iframe[title*='recaptcha challenge']"
+            "iframe[src*='recaptcha.net/recaptcha/api2/bframe'], "
+            "iframe[src*='recaptcha.net/recaptcha/enterprise/bframe'], "
+            "iframe[title*='recaptcha' i], "
+            "iframe[title*='challenge' i]"
         ).first
         if await iframe_loc.is_visible(timeout=300):
             c_frame = await iframe_loc.content_frame()
@@ -666,24 +678,46 @@ async def is_recaptcha_challenge_visible(page: Page) -> bool:
     if await is_recaptcha_solved(page):
         return False
 
+    chal_selectors = [
+        "#rc-imageselect",
+        ".rc-imageselect-desc-wrapper",
+        "#rc-imageselect-target",
+        ".rc-imageselect-payload",
+        "#recaptcha-reload-button",
+        ".rc-button-reload",
+        "#recaptcha-verify-button",
+        ".help-button-holder",
+        "#solver-button",
+        "#recaptcha-liveness-button",
+        ".rc-button-liveness",
+        "#recaptcha-audio-button",
+        ".rc-doscaptcha-body",
+        ".rc-doscaptcha-header",
+    ]
+    chal_union = ", ".join(chal_selectors)
+
     frame = await find_recaptcha_challenge_frame(page)
     if frame:
         try:
-            img_chal = frame.locator(
-                "#rc-imageselect, .rc-imageselect-desc-wrapper, .rc-doscaptcha-body, .rc-doscaptcha-header, "
-                "#recaptcha-reload-button, .help-button-holder, #recaptcha-liveness-button, .rc-button-liveness, "
-                "button#solver-button"
-            ).first
-            if await img_chal.is_visible(timeout=300):
-                try:
-                    iframe_loc = page.locator("iframe[src*='recaptcha/api2/bframe'], iframe[title*='recaptcha challenge']").first
-                    box = await iframe_loc.bounding_box()
-                    if box and (box.get("width", 0) > 350 and box.get("height", 0) > 300):
-                        return True
-                except Exception:
-                    return True
+            chal_loc = frame.locator(chal_union).first
+            if await chal_loc.is_visible(timeout=300):
+                return True
         except Exception:
             pass
+
+    # Direct fallback: scan all frames across the page
+    for f in page.frames:
+        try:
+            f_url = (f.url or "").lower()
+            if "recaptcha" in f_url:
+                chal_loc = f.locator(
+                    "#rc-imageselect, #recaptcha-reload-button, #recaptcha-verify-button, "
+                    ".help-button-holder, #solver-button, #recaptcha-liveness-button"
+                ).first
+                if await chal_loc.is_visible(timeout=150):
+                    return True
+        except Exception:
+            continue
 
     return False
 
@@ -743,13 +777,15 @@ async def _click_recaptcha_reload(frame: Frame) -> bool:
 async def _click_recaptcha_solver(frame: Frame) -> bool:
     """Click 'человечек' solver button (Buster extension or native liveness button)."""
     solver_selectors = [
-        # Buster extension container / button ('человечек' - orange person silhouette with green checkmark)
-        ".help-button-holder",
-        "div.help-button-holder",
-        ".button-holder.help-button-holder",
+        # Buster extension button ('человечек' - orange person silhouette with green checkmark)
         "#solver-button",
         "button#solver-button",
         ".help-button-holder button",
+        ".button-holder.help-button-holder button",
+        "button.rc-button-default#solver-button",
+        ".help-button-holder",
+        "div.help-button-holder",
+        ".button-holder.help-button-holder",
         "button[title*='Solve' i]",
         "button[title*='Buster' i]",
         "button[title*='human' i]",
@@ -763,7 +799,6 @@ async def _click_recaptcha_solver(frame: Frame) -> bool:
         "button[title*='liveness' i]",
         "button[id*='liveness']",
         "button[aria-label*='liveness' i]",
-        "button.rc-button-default#solver-button",
     ]
     for sel in solver_selectors:
         try:

@@ -563,7 +563,26 @@ class EtixCheckEngine:
                     self.profile_manager.record_good_proxy(worker.profile.proxy_key)
                 else:
                     details_list.append(f"[{w_tag}] {msg}")
-                    if "капч" in msg.lower() or "recaptcha" in msg.lower() or "blocked" in msg.lower():
+                    is_captcha_blocked = (
+                        "капч" in msg.lower()
+                        or "recaptcha" in msg.lower()
+                        or "blocked" in msg.lower()
+                        or "sys-bs-004" in msg.lower()
+                    )
+                    if not is_captcha_blocked:
+                        try:
+                            if (
+                                await is_recaptcha_challenge_visible(worker.page)
+                                or await self.detector.is_slider_captcha(worker.page)
+                                or await self.detector.is_blocked_page(worker.page)
+                                or await self.detector.is_captcha_required_error(worker.page)
+                            ):
+                                is_captcha_blocked = True
+                                msg += " (капча/блокировка обнаружена на странице)"
+                        except Exception:
+                            pass
+
+                    if is_captcha_blocked:
                         LOGGER.warning(
                             f"[{w_tag}] Add to Cart blocked/unsolved: {msg}. "
                             f"Hot-swapping worker to close failing browser and prevent hanging window..."
