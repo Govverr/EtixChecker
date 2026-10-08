@@ -10,6 +10,7 @@ from playwright.async_api import Page, Locator
 from src.browser.human_actions import (
     accept_cookies_if_present,
     close_blocking_popups,
+    handle_captcha_required_back,
     handle_empty_shopping_cart_conflict,
     human_sleep,
     is_recaptcha_challenge_visible,
@@ -464,6 +465,11 @@ class EtixCartHandler:
                 LOGGER.info("Tax scheme conflict detected during dynamic wait.")
                 break
 
+            # 3b. SYS-BS-004 "Response to CAPTCHA is required" error detected
+            if await self.detector.is_captcha_required_error(page):
+                LOGGER.warning("SYS-BS-004 error detected during dynamic wait.")
+                break
+
             # 4. Explicit error banner indicating sold out or per-order limit
             # IMPORTANT: Never break on generic div[role='alert'] because venue disclaimers/rules
             # are permanently present in DOM before and after submission!
@@ -558,6 +564,62 @@ class EtixCartHandler:
                     await human_sleep((1500, 3000))
                     if await self.detector.is_cart_page(page):
                         return True, selected_qty, "Успешно добавлено в корзину"
+
+        # Check for Etix SYS-BS-004 error ("Response to CAPTCHA is required. Please go back and try again.")
+        if await self.detector.is_captcha_required_error(page):
+            LOGGER.warning(
+                "SYS-BS-004 ('Response to CAPTCHA is required') error detected after Add Tickets. "
+                "Recovering: clicking 'Back' and re-adding tickets..."
+            )
+            back_ok = await handle_captcha_required_back(page)
+            if back_ok:
+                await human_sleep((500, 1000))
+                await accept_cookies_if_present(page, timeout_ms=300)
+                await close_blocking_popups(page, timeout_ms=300)
+                await self.detector.switch_to_price_level_if_seating_chart(page)
+
+                # Re-select ticket quantity for the requested category
+                retry_ctrl = await self.find_ticket_select(page, ticket_index)
+                if retry_ctrl:
+                    r_tag = await retry_ctrl.evaluate("el => el.tagName.toLowerCase()")
+                    if r_tag == "select":
+                        await self._robust_select_quantity(retry_ctrl, requested_qty)
+                    else:
+                        await self._select_mui_combobox_quantity(page, retry_ctrl, requested_qty)
+
+                    await human_sleep(self.config.after_click_sleep_ms)
+
+                    # Solve reCAPTCHA if already visible on event page after Back
+                    if await is_recaptcha_challenge_visible(page):
+                        LOGGER.info("reCAPTCHA active on event page after 'Back'. Solving before Add Tickets...")
+                        await solve_recaptcha_challenge(page, max_attempts=3)
+
+                    r_add_btn = await self.find_add_button(page)
+                    if r_add_btn:
+                        await r_add_btn.click(timeout=self.config.click_timeout)
+                        await human_sleep((1000, 2000))
+
+                        # If reCAPTCHA challenge appears upon clicking Add Tickets, solve it
+                        if await is_recaptcha_challenge_visible(page):
+                            LOGGER.info("reCAPTCHA challenge appeared upon retrying Add Tickets after Back. Solving...")
+                            solved_retry, r_reason = await solve_recaptcha_challenge(page, max_attempts=3)
+                            if not solved_retry:
+                                LOGGER.error(f"reCAPTCHA not resolved after Back recovery: {r_reason}")
+                                return False, 0, f"Заблокировано капчей (reCAPTCHA: {r_reason})"
+
+                        # Dynamic poll for cart page
+                        r_deadline = asyncio.get_event_loop().time() + 12.0
+                        while asyncio.get_event_loop().time() < r_deadline:
+                            if await self.detector.is_cart_page(page):
+                                LOGGER.info("Cart page reached successfully after SYS-BS-004 'Back' recovery!")
+                                return True, selected_qty, "Успешно добавлено в корзину (после восстановления через 'Back')"
+                            if await self.detector.is_captcha_required_error(page):
+                                LOGGER.error("SYS-BS-004 error appeared again after 'Back' retry.")
+                                return False, 0, "Заблокировано капчей (SYS-BS-004 repeated error)"
+                            await asyncio.sleep(0.3)
+            else:
+                LOGGER.warning("Failed to navigate back from SYS-BS-004 page.")
+                return False, 0, "Ошибка капчи (SYS-BS-004: не удалось вернуться по кнопке 'Back')"
 
         # Check for inventory exhaustion or per-order limit error message
         try:

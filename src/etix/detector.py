@@ -428,3 +428,28 @@ class EtixDetector:
             return await loc.is_visible(timeout=250)
         except Exception:
             return False
+
+    async def is_captcha_required_error(self, page: Page) -> bool:
+        """
+        Check whether page displays Etix 'Response to CAPTCHA is required' / SYS-BS-004 error.
+        """
+        try:
+            err_loc = page.locator(
+                "text=/Response to CAPTCHA is required/i, "
+                "text=/SYS-BS-004/i, "
+                "text=/Status Code:\\s*SYS-BS-004/i"
+            ).first
+            if await err_loc.is_visible(timeout=200):
+                return True
+        except Exception:
+            pass
+
+        try:
+            body_text = await page.inner_text("body", timeout=300)
+            if "SYS-BS-004" in body_text or "Response to CAPTCHA is required" in body_text:
+                return True
+        except Exception:
+            pass
+
+        return False
+

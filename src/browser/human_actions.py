@@ -231,6 +231,106 @@ async def handle_empty_shopping_cart_conflict(
         return False
 
 
+async def handle_captcha_required_back(page: Page, target_url: Optional[str] = None) -> bool:
+    """
+    Handle Etix 'Response to CAPTCHA is required. Please go back and try again. Status Code: SYS-BS-004':
+    1. Check if error is present on page.
+    2. Click the orange 'Back' button to return to the performance selection form.
+    3. Fallback to page.go_back() or direct navigation to target_url if button click fails.
+    4. Wait for page hydration and return True once back on event page.
+    """
+    try:
+        has_error = False
+        try:
+            err_loc = page.locator(
+                "text=/Response to CAPTCHA is required/i, "
+                "text=/SYS-BS-004/i, "
+                "text=/Status Code:\\s*SYS-BS-004/i"
+            ).first
+            if await err_loc.is_visible(timeout=300):
+                has_error = True
+        except Exception:
+            pass
+
+        if not has_error:
+            try:
+                body_lower = (await page.inner_text("body", timeout=300)).lower()
+                if "sys-bs-004" in body_lower or "response to captcha is required" in body_lower:
+                    has_error = True
+            except Exception:
+                pass
+
+        if not has_error:
+            return False
+
+        LOGGER.warning("Detected SYS-BS-004 error page. Attempting to click 'Back' button...")
+
+        back_selectors = [
+            "button:has-text('Back')",
+            "input[value='Back' i]",
+            "a:has-text('Back')",
+            "button[value='Back' i]",
+            "input[type='button'][value*='Back' i]",
+            "input[type='submit'][value*='Back' i]",
+            ".btn:has-text('Back')",
+            "text=/^Back$/i",
+        ]
+
+        clicked = False
+        for sel in back_selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=400):
+                    await btn.scroll_into_view_if_needed(timeout=1000)
+                    try:
+                        await btn.click(timeout=2500)
+                    except Exception:
+                        await btn.evaluate("el => el.click()")
+                    clicked = True
+                    LOGGER.info(f"Clicked 'Back' button via {sel}.")
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            LOGGER.warning("Could not find/click 'Back' button directly. Calling page.go_back()...")
+            try:
+                await page.go_back(wait_until="domcontentloaded", timeout=7000)
+                clicked = True
+            except Exception as gb_exc:
+                LOGGER.debug(f"page.go_back() failed: {gb_exc}")
+
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=7000)
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+
+        still_on_error = False
+        try:
+            body_now = (await page.inner_text("body", timeout=400)).lower()
+            if "sys-bs-004" in body_now and "response to captcha is required" in body_now:
+                still_on_error = True
+        except Exception:
+            pass
+
+        if still_on_error and target_url:
+            LOGGER.info(f"Still on error page after Back. Navigating directly to target URL: {target_url}...")
+            try:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        LOGGER.info("Successfully recovered from SYS-BS-004 error page via 'Back'.")
+        return True
+
+    except Exception as exc:
+        LOGGER.warning(f"Exception in handle_captcha_required_back: {exc}")
+        return False
+
+
+
 def _generate_bezier_points(
     start_x: float,
     start_y: float,
