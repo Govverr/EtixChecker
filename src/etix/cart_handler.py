@@ -508,10 +508,14 @@ class EtixCartHandler:
         # Check if Google reCAPTCHA v2 challenge appeared!
         if await is_recaptcha_challenge_visible(page):
             LOGGER.warning("reCAPTCHA challenge detected upon clicking 'Add Tickets'!")
-            solved, reason = await solve_recaptcha_challenge(page)
+            solved, reason = await solve_recaptcha_challenge(page, max_attempts=3)
             if not solved:
+                if reason == "ip_rate_limited_doscaptcha":
+                    LOGGER.error("reCAPTCHA rate-limited by Google (automated queries / doscaptcha). Aborting profile.")
+                    return False, 0, "Заблокировано капчей (reCAPTCHA: IP rate-limited doscaptcha)"
+
                 LOGGER.warning(
-                    f"reCAPTCHA not resolved on initial solve attempt ({reason}). "
+                    f"reCAPTCHA not resolved on initial in-dialog attempts ({reason}). "
                     f"Step 3: Reloading page and retrying full add-to-cart solve cycle once..."
                 )
                 try:
@@ -536,7 +540,7 @@ class EtixCartHandler:
                             await human_sleep((1000, 2000))
                             if await is_recaptcha_challenge_visible(page):
                                 LOGGER.info("reCAPTCHA challenge appeared again after reload. Repeating solve sequence...")
-                                solved_retry, reason_retry = await solve_recaptcha_challenge(page)
+                                solved_retry, reason_retry = await solve_recaptcha_challenge(page, max_attempts=2)
                                 if not solved_retry:
                                     LOGGER.error("reCAPTCHA could not be resolved after page reload retry.")
                                     return False, 0, f"Заблокировано капчей (reCAPTCHA: {reason_retry})"

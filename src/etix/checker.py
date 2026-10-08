@@ -19,7 +19,9 @@ from src.browser.human_actions import (
     close_blocking_popups,
     handle_empty_shopping_cart_conflict,
     human_sleep,
+    is_recaptcha_challenge_visible,
     solve_datadome_slider,
+    solve_recaptcha_challenge,
 )
 from src.config.settings import AppConfig, CONFIG
 from src.domain.enums import ProfileRole, ShowStatus
@@ -562,7 +564,23 @@ class EtixCheckEngine:
                 else:
                     details_list.append(f"[{w_tag}] {msg}")
                     if "капч" in msg.lower() or "recaptcha" in msg.lower() or "blocked" in msg.lower():
-                        self.profile_manager.record_blocked_profile(worker.profile, f"Add to Cart blocked: {msg}")
+                        LOGGER.warning(
+                            f"[{w_tag}] Add to Cart blocked/unsolved: {msg}. "
+                            f"Hot-swapping worker to close failing browser and prevent hanging window..."
+                        )
+                        if self.cdp_pool:
+                            try:
+                                new_w = await self.cdp_pool.replace_worker_with_reserve(
+                                    worker, reason=f"Add to Cart blocked: {msg}"
+                                )
+                                if not new_w:
+                                    await self.cdp_pool.stop_and_remove_worker(
+                                        worker, reason=f"Add to Cart blocked: {msg}"
+                                    )
+                            except Exception as swap_err:
+                                LOGGER.error(f"[{w_tag}] Error during hot-swap on cart failure: {swap_err}")
+                        else:
+                            self.profile_manager.record_blocked_profile(worker.profile, f"Add to Cart blocked: {msg}")
             elif isinstance(res, Exception):
                 details_list.append(f"[{w_tag}] Ошибка: {res}")
             else:
@@ -909,6 +927,37 @@ class EtixCheckEngine:
                 await close_blocking_popups(current_worker.page)
                 await handle_empty_shopping_cart_conflict(current_worker.page, target_url=show.url)
                 await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
+
+                # 8a. Check if reCAPTCHA challenge is active on page entry
+                if await is_recaptcha_challenge_visible(current_worker.page):
+                    LOGGER.warning(
+                        f"[Worker #{current_worker.worker_index}] reCAPTCHA challenge active on page entry for '{current_worker.profile.name}'. Solving..."
+                    )
+                    solved_rc, r_reason = await solve_recaptcha_challenge(current_worker.page, max_attempts=3)
+                    if not solved_rc:
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] reCAPTCHA not resolved on show entry ({r_reason}). Hot-swapping..."
+                        )
+                        self.profile_manager.record_blocked_profile(
+                            current_worker.profile, f"reCAPTCHA on entry: {r_reason}"
+                        )
+                        if current_worker.profile.proxy_key:
+                            self.profile_manager.record_bad_proxy(
+                                current_worker.profile.proxy_key, f"reCAPTCHA on entry: {r_reason}"
+                            )
+                        if swaps_done < max_profile_swaps and self.cdp_pool:
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
+                                current_worker, reason=f"reCAPTCHA on entry: {r_reason}"
+                            )
+                            if new_w:
+                                current_worker = new_w
+                                swaps_done += 1
+                                continue
+                        if self.cdp_pool:
+                            await self.cdp_pool.stop_and_remove_worker(
+                                current_worker, reason=f"reCAPTCHA on entry: {r_reason}"
+                            )
+                        return None
 
                 try:
                     await current_worker.page.wait_for_selector(

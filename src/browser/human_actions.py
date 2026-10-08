@@ -588,27 +588,28 @@ async def is_recaptcha_challenge_visible(page: Page) -> bool:
     return False
 
 
-async def solve_recaptcha_challenge(page: Page) -> Tuple[bool, str]:
+async def _is_recaptcha_doscaptcha(frame: Frame) -> bool:
     """
-    Automated solver for Google reCAPTCHA v2 according to exact requirements:
-    1. Click Reload ('↺') button strictly once inside challenge frame.
-    2. Wait 2.0s to check if challenge resolves/disappears.
-    3. If still open/changed: click the 'человечек' button (#recaptcha-liveness-button / Buster solver).
-    4. Wait up to 10 seconds for resolution.
-    Returns: (is_solved, detail_message)
+    Check if Google has blocked automated audio requests with doscaptcha
+    ('Try again later. Your computer or network may be sending automated queries...').
     """
-    frame = await find_recaptcha_challenge_frame(page)
-    if not frame:
-        if not await is_recaptcha_challenge_visible(page):
-            return True, "no_recaptcha_present"
-        await asyncio.sleep(0.5)
-        frame = await find_recaptcha_challenge_frame(page)
-        if not frame:
-            return False, "challenge_frame_unreachable"
+    try:
+        dos_loc = frame.locator(".rc-doscaptcha-body, .rc-doscaptcha-header, .rc-doscaptcha-footer").first
+        if await dos_loc.is_visible(timeout=150):
+            return True
+    except Exception:
+        pass
+    try:
+        body_text = (await frame.inner_text("body", timeout=250)).lower()
+        if "try again later" in body_text and "automated queries" in body_text:
+            return True
+    except Exception:
+        pass
+    return False
 
-    LOGGER.info("Detected Google reCAPTCHA challenge. Step 1: Clicking Reload button ('↺') strictly once...")
 
-    # Step 1: Reload button
+async def _click_recaptcha_reload(frame: Frame) -> bool:
+    """Click reCAPTCHA Reload button ('↺') to request a fresh challenge."""
     reload_selectors = [
         "#recaptcha-reload-button",
         "button#recaptcha-reload-button",
@@ -617,37 +618,30 @@ async def solve_recaptcha_challenge(page: Page) -> Tuple[bool, str]:
         "button[title*='challenge' i]",
         "button[id*='reload']",
     ]
-    reload_clicked = False
     for sel in reload_selectors:
         try:
             r_btn = frame.locator(sel).first
             if await r_btn.is_visible(timeout=400):
+                try:
+                    cls_attr = await r_btn.get_attribute("class") or ""
+                    if "rc-button-disabled" in cls_attr:
+                        continue
+                except Exception:
+                    pass
                 await r_btn.scroll_into_view_if_needed(timeout=1000)
                 try:
                     await r_btn.click(timeout=1500)
                 except Exception:
                     await r_btn.evaluate("el => el.click()")
-                reload_clicked = True
                 LOGGER.info(f"Clicked reCAPTCHA reload button ('↺') via {sel}.")
-                break
+                return True
         except Exception:
             continue
+    return False
 
-    if not reload_clicked:
-        LOGGER.warning("Could not find reCAPTCHA reload button in challenge frame.")
 
-    # Wait 2.0s to check if challenge closed
-    await asyncio.sleep(2.0)
-    if not await is_recaptcha_challenge_visible(page):
-        LOGGER.info("reCAPTCHA challenge cleared successfully after Reload button click!")
-        return True, "cleared_via_reload"
-
-    # Step 2: If captcha still visible -> Click 'человечек' (Liveness / Buster solver button)
-    LOGGER.info("Captcha still visible after Reload. Step 2: Clicking 'человечек' solver button...")
-
-    # Re-acquire active challenge frame in case reload refreshed the iframe DOM
-    active_frame = await find_recaptcha_challenge_frame(page) or frame
-
+async def _click_recaptcha_solver(frame: Frame) -> bool:
+    """Click 'человечек' solver button (Buster extension or native liveness button)."""
     solver_selectors = [
         # Buster extension container / button ('человечек' - orange person silhouette with green checkmark)
         ".help-button-holder",
@@ -671,10 +665,9 @@ async def solve_recaptcha_challenge(page: Page) -> Tuple[bool, str]:
         "button[aria-label*='liveness' i]",
         "button.rc-button-default#solver-button",
     ]
-    solver_clicked = False
     for sel in solver_selectors:
         try:
-            s_btn = active_frame.locator(sel).first
+            s_btn = frame.locator(sel).first
             if await s_btn.is_visible(timeout=500):
                 box = None
                 try:
@@ -685,58 +678,134 @@ async def solve_recaptcha_challenge(page: Page) -> Tuple[bool, str]:
                     try:
                         await s_btn.scroll_into_view_if_needed(timeout=1000)
                         await s_btn.click(timeout=1500)
-                        solver_clicked = True
                     except Exception:
                         await s_btn.evaluate("el => el.click()")
-                        solver_clicked = True
                     LOGGER.info(f"Clicked 'человечек' solver button via {sel}.")
-                    break
+                    return True
         except Exception:
             continue
 
-    if not solver_clicked:
-        # Dynamic fallback: find any visible button in the toolbar that isn't reload/audio/verify
-        try:
-            all_buttons = await active_frame.locator(
-                ".rc-buttons button, .rc-controls button, .button-holder button, .rc-footer button"
-            ).all()
-            for btn in all_buttons:
-                if await btn.is_visible():
-                    b_id = (await btn.get_attribute("id") or "").lower()
-                    b_cls = (await btn.get_attribute("class") or "").lower()
-                    if any(skip in b_id for skip in ["reload", "audio", "image", "undo", "verify"]):
-                        continue
-                    if any(skip in b_cls for skip in ["rc-button-reload", "rc-button-audio", "rc-button-image", "rc-button-undo", "rc-button-default"]):
-                        continue
-                    b_text = (await btn.inner_text()).strip().lower()
-                    if b_text in ["verify", "skip", "подтвердить", "пропустить", "далее", "next"]:
-                        continue
+    # Dynamic fallback: find any visible button in the toolbar that isn't reload/audio/verify
+    try:
+        all_buttons = await frame.locator(
+            ".rc-buttons button, .rc-controls button, .button-holder button, .rc-footer button"
+        ).all()
+        for btn in all_buttons:
+            if await btn.is_visible():
+                b_id = (await btn.get_attribute("id") or "").lower()
+                b_cls = (await btn.get_attribute("class") or "").lower()
+                if any(skip in b_id for skip in ["reload", "audio", "image", "undo", "verify"]):
+                    continue
+                if any(skip in b_cls for skip in ["rc-button-reload", "rc-button-audio", "rc-button-image", "rc-button-undo", "rc-button-default"]):
+                    continue
+                b_text = (await btn.inner_text()).strip().lower()
+                if b_text in ["verify", "skip", "подтвердить", "пропустить", "далее", "next"]:
+                    continue
 
-                    LOGGER.info(f"Clicked 'человечек' via dynamic toolbar button fallback (id='{b_id}', class='{b_cls}').")
-                    try:
-                        await btn.scroll_into_view_if_needed(timeout=1000)
-                        await btn.click(timeout=1500)
-                    except Exception:
-                        await btn.evaluate("el => el.click()")
-                    solver_clicked = True
-                    break
-        except Exception as exc:
-            LOGGER.debug(f"Dynamic footer solver button search error: {exc}")
+                LOGGER.info(f"Clicked 'человечек' via dynamic toolbar button fallback (id='{b_id}', class='{b_cls}').")
+                try:
+                    await btn.scroll_into_view_if_needed(timeout=1000)
+                    await btn.click(timeout=1500)
+                except Exception:
+                    await btn.evaluate("el => el.click()")
+                return True
+    except Exception as exc:
+        LOGGER.debug(f"Dynamic footer solver button search error: {exc}")
 
-    if not solver_clicked:
-        LOGGER.warning("Could not locate 'человечек' button in reCAPTCHA challenge frame.")
+    return False
 
-    # Wait up to 10 seconds for resolution
-    LOGGER.info("Awaiting reCAPTCHA resolution after clicking 'человечек' (up to 10 seconds)...")
-    for _ in range(20):  # 20 * 0.5s = 10.0s
-        await asyncio.sleep(0.5)
-        if await is_recaptcha_solved(page):
-            LOGGER.info("reCAPTCHA solved successfully (anchor verified) after clicking 'человечек'!")
-            return True, "cleared_via_solver"
+
+async def solve_recaptcha_challenge(page: Page, max_attempts: int = 3) -> Tuple[bool, str]:
+    """
+    Automated solver for Google reCAPTCHA v2 with robust in-dialog retry loop:
+    Loop up to max_attempts:
+      1. Check if challenge resolved or rate-limited (doscaptcha).
+      2. Click Reload ('↺') button inside challenge frame to get fresh challenge.
+      3. Wait 1.8s to check if challenge resolves or disappears.
+      4. If still visible: click 'человечек' solver button (Buster or native liveness).
+      5. Wait up to 10 seconds for resolution (polling is_recaptcha_solved).
+      6. If speech-to-text failed or challenge persisted: loop to next attempt (↺ + человечек).
+    Returns: (is_solved, detail_message)
+    """
+    if await is_recaptcha_solved(page):
+        return True, "already_solved"
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            if not await is_recaptcha_challenge_visible(page):
+                return True, "cleared_via_solver"
+
+        frame = await find_recaptcha_challenge_frame(page)
+        if not frame:
+            if not await is_recaptcha_challenge_visible(page):
+                return True, "no_recaptcha_present" if attempt == 1 else "cleared_via_solver"
+            await asyncio.sleep(0.5)
+            frame = await find_recaptcha_challenge_frame(page)
+            if not frame:
+                return False, "challenge_frame_unreachable"
+
+        # Check for Google rate-limiting (rc-doscaptcha: automated queries / Try again later)
+        if await _is_recaptcha_doscaptcha(frame):
+            LOGGER.warning(
+                f"reCAPTCHA IP rate-limited by Google (rc-doscaptcha: automated queries) on attempt {attempt}."
+            )
+            return False, "ip_rate_limited_doscaptcha"
+
+        LOGGER.info(
+            f"Solving reCAPTCHA (in-dialog attempt {attempt}/{max_attempts}): "
+            f"Step 1: Clicking Reload button ('↺')..."
+        )
+        reload_clicked = await _click_recaptcha_reload(frame)
+        if not reload_clicked:
+            LOGGER.warning(f"Could not click reCAPTCHA reload button on attempt {attempt}.")
+
+        # Wait 1.8s to check if challenge closed or resolved
+        await asyncio.sleep(1.8)
         if not await is_recaptcha_challenge_visible(page):
-            LOGGER.info("reCAPTCHA challenge cleared successfully after clicking 'человечек'!")
-            return True, "cleared_via_solver"
+            LOGGER.info(f"reCAPTCHA challenge cleared successfully after Reload (attempt {attempt})!")
+            return True, "cleared_via_reload"
 
-    LOGGER.warning("reCAPTCHA challenge was not cleared after Reload and 'человечек'.")
+        # Re-acquire active frame (reload might refresh iframe DOM)
+        active_frame = await find_recaptcha_challenge_frame(page) or frame
+
+        if await _is_recaptcha_doscaptcha(active_frame):
+            LOGGER.warning("reCAPTCHA rate-limited by Google after Reload (doscaptcha).")
+            return False, "ip_rate_limited_doscaptcha"
+
+        # Step 2: Click 'человечек' (Liveness / Buster solver button)
+        LOGGER.info(
+            f"Solving reCAPTCHA (in-dialog attempt {attempt}/{max_attempts}): "
+            f"Step 2: Clicking 'человечек' solver button..."
+        )
+        solver_clicked = await _click_recaptcha_solver(active_frame)
+        if not solver_clicked:
+            LOGGER.warning(f"Could not locate 'человечек' button on attempt {attempt}.")
+
+        # Wait up to 10 seconds for resolution
+        LOGGER.info(
+            f"Awaiting reCAPTCHA resolution after clicking 'человечек' (attempt {attempt}/{max_attempts}, up to 10s)..."
+        )
+        for _ in range(20):  # 20 * 0.5s = 10.0s
+            await asyncio.sleep(0.5)
+            if await is_recaptcha_solved(page):
+                LOGGER.info(f"reCAPTCHA solved successfully (anchor verified) on attempt {attempt}!")
+                return True, "cleared_via_solver"
+            if not await is_recaptcha_challenge_visible(page):
+                LOGGER.info(f"reCAPTCHA challenge cleared successfully on attempt {attempt}!")
+                return True, "cleared_via_solver"
+            if await _is_recaptcha_doscaptcha(active_frame):
+                LOGGER.warning("Google switched to doscaptcha (IP rate-limit) during solving.")
+                return False, "ip_rate_limited_doscaptcha"
+
+        LOGGER.warning(
+            f"reCAPTCHA challenge was not cleared after attempt {attempt}/{max_attempts}."
+        )
+        if attempt < max_attempts:
+            LOGGER.info(
+                f"Retrying in-dialog solve cycle: Reload ('↺') + 'человечек' (attempt {attempt + 1}/{max_attempts})..."
+            )
+            await asyncio.sleep(1.0)
+
+    LOGGER.warning(f"reCAPTCHA challenge remained active after {max_attempts} in-dialog attempts.")
     return False, "not_cleared_after_solver"
 
