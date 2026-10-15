@@ -432,6 +432,10 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
     for attempt in range(1, 3):
         LOGGER.info(f"Executing DataDome slider solve attempt {attempt}/2...")
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
 
         target_handle = None
         target_frame: Optional[Frame] = None
@@ -567,7 +571,12 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
                 f"[Distance: {end_x - start_x:.1f}px]"
             )
 
-            # Ensure focus on handle / iframe
+            # Ensure page is in front and focused
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+
             try:
                 await target_handle.focus()
             except Exception:
@@ -579,9 +588,9 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             except Exception:
                 await page.mouse.move(start_x, start_y)
 
-            await asyncio.sleep(random.uniform(0.15, 0.28))
+            await asyncio.sleep(random.uniform(0.18, 0.32))
             await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.06, 0.14))
+            await asyncio.sleep(random.uniform(0.08, 0.16))
 
             # Bezier points: slightly faster on attempt 2
             steps = random.randint(24, 32) if attempt == 2 else random.randint(28, 38)
@@ -591,19 +600,19 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             for idx, (px, py) in enumerate(points):
                 await page.mouse.move(px, py)
                 if idx == pause_milestone and attempt == 1:
-                    await asyncio.sleep(random.uniform(0.012, 0.025))
+                    await asyncio.sleep(random.uniform(0.015, 0.030))
                 else:
                     phase_ratio = idx / steps
                     if phase_ratio < 0.25 or phase_ratio > 0.8:
-                        await asyncio.sleep(random.uniform(0.008, 0.018))
+                        await asyncio.sleep(random.uniform(0.010, 0.020))
                     else:
-                        await asyncio.sleep(random.uniform(0.005, 0.012))
+                        await asyncio.sleep(random.uniform(0.006, 0.014))
 
             # Lock-in phase
             await page.mouse.move(end_x + random.uniform(1.0, 3.0), end_y)
-            await asyncio.sleep(random.uniform(0.06, 0.12))
+            await asyncio.sleep(random.uniform(0.08, 0.15))
             await page.mouse.move(end_x, end_y)
-            await asyncio.sleep(random.uniform(0.12, 0.22))
+            await asyncio.sleep(random.uniform(0.15, 0.25))
 
             await page.mouse.up()
             LOGGER.info(f"[Attempt {attempt}/2] Completed slider drag motion. Checking validation...")

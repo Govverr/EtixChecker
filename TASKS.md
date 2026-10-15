@@ -22,16 +22,22 @@
   - **Линия 1 (Нативное решение на месте):** При клике «Clear Shopping Cart» или подтверждении в модальном диалоге перехватывается появление слайдера, вызывается `solve_datadome_slider`, после чего очистка корзины повторно подтверждается.
   - **Линия 2 (Сброс сессионных кук):** Если слайдер не удалось решить, вызывается `await page.context.clear_cookies()`, разрывая сессию привязки к заблокированной корзине и освобождая воркер.
   - **Линия 3 (Гарантированная чистота сессии):** После любого освобождения корзины сессионные куки контекста всегда сбрасываются для гарантированно чистой проверки следующего шоу.
+- [x] **Устранение ложного жесткого бана и обеспечение решения DataDome слайдера воркерами**
+  - **Диагностика и корень проблемы:** Чекер не двигал ползунок DataDome из-за того, что заголовок фрейма `<title>You have been blocked | etix</title>` ложно активировал `is_blocked_page = True`. Это полностью блокировало вызов `solve_datadome_slider` из-за условия `not is_blocked and is_slider_captcha`, сразу отправляя воркер на перезагрузку и Hot-Swap.
+  - **Safety Invariant в `src/etix/detector.py`:** Если на странице есть интерактивный слайдер (`is_slider_captcha == True`), метод `is_blocked_page` строго возвращает `False`. Фреймы капчи исключены из текстового поиска банов.
+  - **Приоритет слайдера в `src/etix/checker.py`:** Проверка и решение слайдера выполняются ДО проверки бана страницы.
+  - **Перехват асинхронного всплывания слайдера на шаге 8:** Добавлена проверка и решение слайдера при ожидании селекторов билетов и после перезагрузки.
+  - **Надежность захвата в SunBrowser (`src/browser/human_actions.py`):** Внедрены `page.bring_to_front()`, `target_handle.focus()`, калибровка пауз `mousedown` ($80-160\text{мс}$) и финального `lock-in` ($150-250\text{мс}$).
 - [x] **Полное модульное и регрессионное самотестирование (Verification Gate)**
   - Все тесты проекта пройдены на 100% (GREEN):
-    - `tests/test_new_features.py`: 39/39 PASSED.
+    - `tests/test_new_features.py`: 41/41 PASSED (добавлены `test_is_blocked_page_returns_false_when_slider_is_active`, `test_ensure_worker_ready_solves_asynchronous_slider_in_step_8`).
     - `tests/test_pool_and_delays.py`: 23/23 PASSED.
     - `tests/test_slider_and_sync.py`: 4/4 PASSED.
     - `tests/test_dynamic_group_switch.py`: 1/1 PASSED.
     - `tests/test_pagination_and_groups.py`: 3/3 PASSED.
     - `tests/test_updater.py`: 3/3 PASSED.
     - `tests/test_verification.py`: 9/9 PASSED.
-    - Итого: **82/82 теста зеленые**.
+    - Итого: **84/84 теста зеленые**.
 
 ---
 

@@ -305,9 +305,16 @@ class EtixDetector:
         return False
 
     async def is_blocked_page(self, page: Page) -> bool:
-        """Check whether DataDome returned 'Access Temporarily Blocked' in main page or any iframe."""
+        """
+        Check whether DataDome returned 'Access Temporarily Blocked' in main page or any iframe.
+        Safety Invariant: If an interactive slider captcha is active, it is NOT an un-solvable hard block.
+        """
+        # 0. Safety Invariant: Check if interactive slider captcha is present first!
+        if await self.is_slider_captcha(page):
+            return False
+
         try:
-            # Check page title first (instant)
+            # Check page title first (strict check - avoid matching generic words)
             title = await page.title()
             for pattern in self.config.blocked_text_patterns:
                 if re.search(pattern, title, flags=re.I):
@@ -326,9 +333,12 @@ class EtixDetector:
         except Exception:
             pass
 
-        # Check all frames (main page + iframes)
+        # Check all frames (main page + iframes, excluding captcha challenge frames)
         for frame in page.frames:
             try:
+                f_url = (frame.url or "").lower()
+                if "captcha-delivery.com" in f_url or "datadome.co" in f_url:
+                    continue
                 body_text = await frame.inner_text("body", timeout=400)
                 for pattern in self.config.blocked_text_patterns:
                     if re.search(pattern, body_text, flags=re.I):
@@ -373,7 +383,7 @@ class EtixDetector:
         slider_union = (
             "[role='slider'], .slider-button, #sec-slider, .sec-slider-btn, "
             ".slider, .geetest_slider_button, #sec-slider-btn, .captcha-slider-btn, "
-            "div.sliderBtn, #slider, .tc-slider-normal"
+            "div.sliderBtn, #slider, .tc-slider-normal, .sliderContainer, #ddv1-captcha-container"
         )
         try:
             loc = page.locator(slider_union).first
