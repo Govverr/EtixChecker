@@ -132,13 +132,18 @@ class EtixDetector:
             has_direct_controls = await page.locator(
                 ".smoketest-ticket-quantity [role='combobox'], select[name*='quantity']"
             ).first.is_visible()
-            if has_direct_controls and not await page.locator("a.ui-tabs-anchor:has-text('Price Level')").first.is_visible():
+            if has_direct_controls and not await page.locator(
+                "a.ui-tabs-anchor:has-text('Price Level'), a.ui-tabs-anchor:has-text('Best Available')"
+            ).first.is_visible():
                 return False
 
             pl_loc = page.locator(
                 "a.ui-tabs-anchor:has-text('Price Level'), a:has-text('Price Level'), "
                 "button:has-text('Price Level'), [role='tab']:has-text('Price Level'), "
-                "li:has-text('Price Level')"
+                "li:has-text('Price Level'), "
+                "a.ui-tabs-anchor:has-text('Best Available'), a:has-text('Best Available'), "
+                "button:has-text('Best Available'), [role='tab']:has-text('Best Available'), "
+                "li:has-text('Best Available')"
             ).first
             sc_loc = page.locator(
                 "a.ui-tabs-anchor:has-text('Seating Chart'), a:has-text('Seating Chart'), "
