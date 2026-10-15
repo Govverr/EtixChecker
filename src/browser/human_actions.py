@@ -430,6 +430,21 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         "div[class*='slider_track']",
     ]
 
+    # 0. Fast-path: Check if already solved (.slider-success/.captcha-success)
+    try:
+        for f in page.frames:
+            try:
+                if await f.locator(".slider-success, .captcha-success").first.is_visible(timeout=100):
+                    LOGGER.info("DataDome slider already solved (detected .slider-success/.captcha-success in frame)!")
+                    return True
+            except Exception:
+                continue
+        if await page.locator(".slider-success, .captcha-success").first.is_visible(timeout=100):
+            LOGGER.info("DataDome slider already solved (detected .slider-success/.captcha-success in page)!")
+            return True
+    except Exception:
+        pass
+
     for attempt in range(1, 3):
         LOGGER.info(f"Executing DataDome slider solve attempt {attempt}/2...")
         try:
@@ -486,6 +501,19 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
                 pass
 
         if not target_handle:
+            # Check if during wait the slider was solved or controls became active!
+            try:
+                for f in page.frames:
+                    if await f.locator(".slider-success, .captcha-success").first.is_visible(timeout=100):
+                        LOGGER.info("DataDome slider solved successfully (found .slider-success/.captcha-success)!")
+                        return True
+                if await page.locator(".slider-success, .captcha-success").first.is_visible(timeout=100):
+                    LOGGER.info("DataDome slider solved successfully (found .slider-success/.captcha-success)!")
+                    return True
+
+            except Exception:
+                pass
+
             LOGGER.warning(f"Could not find DataDome slider handle in any page/frames (attempt {attempt}/2).")
             if attempt < 2:
                 await asyncio.sleep(0.8)
@@ -659,6 +687,18 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
     # Final check after all attempts
     try:
+        for f in page.frames:
+            try:
+                if await f.locator(".slider-success, .captcha-success").first.is_visible(timeout=150):
+                    LOGGER.info("DataDome slider solved successfully (.slider-success visible on final check)!")
+                    return True
+            except Exception:
+                continue
+        if await page.locator(".slider-success, .captcha-success").first.is_visible(timeout=150):
+            LOGGER.info("DataDome slider solved successfully (.slider-success visible on final check)!")
+            return True
+
+
         if target_handle and not await target_handle.is_visible(timeout=400):
             LOGGER.info("DataDome slider solved on final check!")
             return True

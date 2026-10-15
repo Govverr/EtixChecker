@@ -307,11 +307,22 @@ class EtixDetector:
     async def is_blocked_page(self, page: Page) -> bool:
         """
         Check whether DataDome returned 'Access Temporarily Blocked' in main page or any iframe.
-        Safety Invariant: If an interactive slider captcha is active, it is NOT an un-solvable hard block.
+        Safety Invariant: If an interactive slider captcha is active or solved, it is NOT an un-solvable hard block.
         """
         # 0. Safety Invariant: Check if interactive slider captcha is present first!
         if await self.is_slider_captcha(page):
             return False
+
+        # If DataDome success state is currently visible, page is unlocking, NOT blocked
+        try:
+            for frame in page.frames:
+                if await frame.locator(".slider-success, .captcha-success").first.is_visible(timeout=50):
+                    return False
+            if await page.locator(".slider-success, .captcha-success").first.is_visible(timeout=50):
+                return False
+        except Exception:
+            pass
+
 
         try:
             # Check page title first (strict check - avoid matching generic words)
@@ -349,45 +360,66 @@ class EtixDetector:
 
     async def is_slider_captcha(self, page: Page) -> bool:
         """
-        Check whether DataDome displayed the slider challenge in the main frame,
+        Check whether DataDome is actively displaying an UNSOLVED slider challenge in the main frame,
         nested iframes (e.g. captcha-delivery.com), or shadow roots.
+        Returns False if the slider was already solved (.slider-success / .captcha-success)
+        or if no interactive slider handle/container is currently active.
         """
-        # 1. Quick check: presence of DataDome captcha iframe in page.frames
+        # 0. Early exit: If challenge was already solved, it is NOT an active challenge!
+        try:
+            for frame in page.frames:
+                try:
+                    if await frame.locator(".slider-success, .captcha-success").first.is_visible(timeout=50):
+                        return False
+                except Exception:
+                    continue
+            if await page.locator(".slider-success, .captcha-success").first.is_visible(timeout=50):
+                return False
+        except Exception:
+            pass
+
+        slider_union = (
+            "[role='slider'], .slider-button, #sec-slider, .sec-slider-btn, "
+            ".slider, .geetest_slider_button, #sec-slider-btn, .captcha-slider-btn, "
+            "div.sliderBtn, #slider, .tc-slider-normal, .sliderContainer, #ddv1-captcha-container"
+        )
+
+        # 1. Check DataDome captcha frames in page.frames: must have an active handle or sliderContainer
         for frame in page.frames:
             try:
                 f_url = (frame.url or "").lower()
                 if "captcha-delivery.com" in f_url or "datadome.co" in f_url:
-                    return True
+                    # Verify if frame contains an active handle or container
+                    f_loc = frame.locator(slider_union).first
+                    if await f_loc.is_visible(timeout=200):
+                        return True
+                    # Check text patterns in frame body
+                    body_text = await frame.inner_text("body", timeout=200)
+                    for pattern in self.config.slider_captcha_patterns:
+                        if re.search(pattern, body_text, flags=re.I):
+                            return True
             except Exception:
                 continue
 
         # 2. Check for explicit DataDome iframe element in DOM
         try:
             cpt_iframe = page.locator("iframe[src*='captcha-delivery.com'], iframe[src*='datadome'], iframe[title*='DataDome']").first
-            if await cpt_iframe.is_visible(timeout=200):
-                return True
+            if await cpt_iframe.is_visible(timeout=150):
+                c_frame = await cpt_iframe.content_frame()
+                if c_frame:
+                    if await c_frame.locator(slider_union).first.is_visible(timeout=150):
+                        return True
+                    body_t = await c_frame.inner_text("body", timeout=150)
+                    for pattern in self.config.slider_captcha_patterns:
+                        if any(re.search(pat, body_t, flags=re.I) for pat in self.config.slider_captcha_patterns):
+                            return True
         except Exception:
             pass
 
-        # 3. Text patterns check across all frames
-        for frame in page.frames:
-            try:
-                body_text = await frame.inner_text("body", timeout=400)
-                for pattern in self.config.slider_captcha_patterns:
-                    if re.search(pattern, body_text, flags=re.I):
-                        return True
-            except Exception:
-                continue
-
-        # 4. Visible slider handle selectors check (single unified query across main page and iframes)
-        slider_union = (
-            "[role='slider'], .slider-button, #sec-slider, .sec-slider-btn, "
-            ".slider, .geetest_slider_button, #sec-slider-btn, .captcha-slider-btn, "
-            "div.sliderBtn, #slider, .tc-slider-normal, .sliderContainer, #ddv1-captcha-container"
-        )
+        # 3. Check for visible slider handles across main page and frames
         try:
             loc = page.locator(slider_union).first
-            if await loc.is_visible(timeout=200):
+            if await loc.is_visible(timeout=150):
                 return True
         except Exception:
             pass
@@ -397,8 +429,18 @@ class EtixDetector:
                 continue
             try:
                 f_loc = frame.locator(slider_union).first
-                if await f_loc.is_visible(timeout=200):
+                if await f_loc.is_visible(timeout=150):
                     return True
+            except Exception:
+                continue
+
+        # 4. Text patterns check across all frames
+        for frame in page.frames:
+            try:
+                body_text = await frame.inner_text("body", timeout=200)
+                for pattern in self.config.slider_captcha_patterns:
+                    if re.search(pattern, body_text, flags=re.I):
+                        return True
             except Exception:
                 continue
 

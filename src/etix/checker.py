@@ -838,8 +838,28 @@ class EtixCheckEngine:
                         f"[Worker #{current_worker.worker_index}] Slider challenge #{round_num} passed! "
                         f"Awaiting session sync & checking for follow-up challenges..."
                     )
-                    # Wait for DataDome validation, DOM sync, or potential page reload
-                    await human_sleep((1800, 2600))
+                    # Poll for DataDome sync, frame detachment, or ticket controls appearance (up to 4.5s)
+                    poll_synced = False
+                    sync_deadline = asyncio.get_event_loop().time() + 4.5
+                    while asyncio.get_event_loop().time() < sync_deadline:
+                        await asyncio.sleep(0.3)
+                        # Check if ticket controls or content have appeared!
+                        try:
+                            has_ctrls = await current_worker.page.locator(
+                                ".smoketest-ticket-quantity, [role='combobox'], select, button:has-text('Add Tickets'), .ticket-type, .price-level"
+                            ).first.is_visible(timeout=100)
+                            if has_ctrls:
+                                LOGGER.info(
+                                    f"[Worker #{current_worker.worker_index}] Ticket controls detected after solving challenge #{round_num}! Proceeding directly."
+                                )
+                                poll_synced = True
+                                is_slider = False
+                                break
+                        except Exception:
+                            pass
+
+                    if poll_synced:
+                        break
 
                     # Check if page is currently navigating or stuck on raw captcha delivery page
                     curr_u = (current_worker.page.url or "").lower()
@@ -853,7 +873,7 @@ class EtixCheckEngine:
                                 wait_until="domcontentloaded",
                                 timeout=self.config.nav_timeout,
                             )
-                            await human_sleep((1000, 1500))
+                            await human_sleep((800, 1200))
                         except Exception as re_nav_err:
                             LOGGER.warning(f"[Worker #{current_worker.worker_index}] Post-captcha navigation warning: {re_nav_err}")
 
@@ -864,38 +884,77 @@ class EtixCheckEngine:
 
                 # 5. Check if blocked (DataDome "Access Temporarily Blocked" or unsolved slider)
                 if is_blocked or is_slider:
-                    LOGGER.warning(
-                        f"[Worker #{current_worker.worker_index}] DataDome block/captcha active on '{current_worker.profile.name}'. "
-                        f"Executing fast 1 reload attempt with cookie reset..."
-                    )
+                    if round_num > 0:
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] Slider was solved ({round_num} rounds), but page needs refresh. "
+                            f"Preserving clearance cookies and reloading..."
+                        )
+                        try:
+                            await current_worker.page.reload(
+                                wait_until="domcontentloaded",
+                                timeout=min(self.config.nav_timeout, 10000),
+                            )
+                        except Exception as reload_err:
+                            LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
+                    else:
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] DataDome block/captcha active on '{current_worker.profile.name}'. "
+                            f"Executing fast 1 reload attempt with cookie reset..."
+                        )
+                        try:
+                            await current_worker.context.clear_cookies()
+                            await human_sleep((100, 200))
+                            await current_worker.page.goto(
+                                show.url,
+                                wait_until="domcontentloaded",
+                                timeout=min(self.config.nav_timeout, 10000),
+                            )
+                        except Exception as reload_err:
+                            LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
+
+                    # After reload, wait for asynchronous DataDome hydration or controls rendering
+                    await human_sleep((1000, 1500))
+
+                    # Fast-path check: Did ticket controls appear after reload?
+                    controls_ready_after_reload = False
                     try:
-                        await current_worker.context.clear_cookies()
-                        await human_sleep((100, 200))
-                        await current_worker.page.goto(
-                            show.url,
-                            wait_until="domcontentloaded",
-                            timeout=min(self.config.nav_timeout, 10000),
-                        )
-                    except Exception as reload_err:
-                        LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
+                        c_loc = current_worker.page.locator(
+                            ".smoketest-ticket-quantity, [role='combobox'], select, button:has-text('Add Tickets'), .ticket-type, .price-level"
+                        ).first
+                        if await c_loc.is_visible(timeout=300):
+                            controls_ready_after_reload = True
+                    except Exception:
+                        pass
 
-                    # After reload with cookie reset, wait for asynchronous DataDome hydration
-                    await human_sleep((1200, 1800))
-
-                    # Support consecutive sliders after reload (up to 2 rounds)
-                    reload_slider_round = 0
-                    while reload_slider_round < 2 and await self.detector.is_slider_captcha(current_worker.page):
-                        reload_slider_round += 1
+                    if controls_ready_after_reload:
                         LOGGER.info(
-                            f"[Worker #{current_worker.worker_index}] Slider challenge appeared after reload (round {reload_slider_round}/2). Solving..."
+                            f"[Worker #{current_worker.worker_index}] Ticket controls rendered ready after reload! Block cleared."
                         )
-                        r_solved = await solve_datadome_slider(current_worker.page)
-                        if not r_solved:
-                            break
-                        await human_sleep((1800, 2400))
+                        still_slider = False
+                        still_blocked = False
+                    else:
+                        # Support consecutive sliders after reload (up to 2 rounds)
+                        reload_slider_round = 0
+                        while reload_slider_round < 2 and await self.detector.is_slider_captcha(current_worker.page):
+                            reload_slider_round += 1
+                            LOGGER.info(
+                                f"[Worker #{current_worker.worker_index}] Slider challenge appeared after reload (round {reload_slider_round}/2). Solving..."
+                            )
+                            r_solved = await solve_datadome_slider(current_worker.page)
+                            if not r_solved:
+                                break
+                            await human_sleep((1500, 2000))
+                            # Check if controls appeared after post-reload solve
+                            try:
+                                if await current_worker.page.locator(
+                                    ".smoketest-ticket-quantity, [role='combobox'], select, button:has-text('Add Tickets'), .ticket-type"
+                                ).first.is_visible(timeout=300):
+                                    break
+                            except Exception:
+                                pass
 
-                    still_slider = await self.detector.is_slider_captcha(current_worker.page)
-                    still_blocked = not still_slider and await self.detector.is_blocked_page(current_worker.page)
+                        still_slider = await self.detector.is_slider_captcha(current_worker.page)
+                        still_blocked = not still_slider and await self.detector.is_blocked_page(current_worker.page)
 
                     if still_blocked or still_slider:
                         reason = "DataDome block after 1 reload" if still_blocked else "Unsolved DataDome slider after 1 reload"

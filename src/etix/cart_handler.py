@@ -515,7 +515,13 @@ class EtixCartHandler:
             if not slider_solved:
                 break
             LOGGER.info(f"DataDome slider challenge #{add_slider_round} passed! Awaiting sync...")
+            if await self.detector.is_cart_page(page):
+                LOGGER.info("Cart page reached immediately after solving slider!")
+                return True, selected_qty, "Успешно добавлено в корзину"
             await human_sleep((1800, 2400))
+            if await self.detector.is_cart_page(page):
+                LOGGER.info("Cart page reached after post-solve sync!")
+                return True, selected_qty, "Успешно добавлено в корзину"
 
         if slider_solved:
             LOGGER.info("DataDome slider solved successfully! Checking for cart redirection...")
