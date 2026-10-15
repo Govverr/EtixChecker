@@ -508,8 +508,76 @@ class EtixCartHandler:
         # Check if DataDome slider appeared upon clicking Add Tickets
         if await self.detector.is_slider_captcha(page):
             LOGGER.info("DataDome slider challenge appeared upon clicking 'Add Tickets'. Solving...")
-            await solve_datadome_slider(page)
-            await human_sleep((1000, 1500))
+            slider_solved = await solve_datadome_slider(page)
+            if slider_solved:
+                LOGGER.info("DataDome slider solved successfully! Checking for cart redirection...")
+                # Dynamic poll for cart page (up to 6.0s)
+                c_deadline = asyncio.get_event_loop().time() + 6.0
+                poll_count = 0
+                while asyncio.get_event_loop().time() < c_deadline and poll_count < 20:
+                    poll_count += 1
+                    if await self.detector.is_cart_page(page):
+                        return True, selected_qty, "Успешно добавлено в корзину"
+                    if await self.detector.is_captcha_required_error(page):
+                        break
+                    await asyncio.sleep(0.3)
+
+                # If cart not reached automatically, re-click 'Add Tickets' with solved clearance token!
+                if not await self.detector.is_cart_page(page) and not await self.detector.is_captcha_required_error(page):
+                    LOGGER.info("Cart page not reached automatically after solving DataDome slider. Re-clicking 'Add Tickets'...")
+                    r_add_btn = await self.find_add_button(page)
+                    if r_add_btn:
+                        await r_add_btn.click(timeout=self.config.click_timeout)
+                        await human_sleep((1000, 2000))
+                        c_deadline = asyncio.get_event_loop().time() + 10.0
+                        poll_count2 = 0
+                        while asyncio.get_event_loop().time() < c_deadline and poll_count2 < 33:
+                            poll_count2 += 1
+                            if await self.detector.is_cart_page(page):
+                                return True, selected_qty, "Успешно добавлено в корзину"
+                            await asyncio.sleep(0.3)
+            else:
+                LOGGER.warning(
+                    "DataDome slider not resolved on initial in-page attempt. "
+                    "Reloading page and retrying full add-to-cart solve cycle once..."
+                )
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=self.config.nav_timeout)
+                    await human_sleep((500, 1000))
+                    await accept_cookies_if_present(page, timeout_ms=300)
+                    await close_blocking_popups(page, timeout_ms=300)
+                    await self.detector.switch_to_price_level_if_seating_chart(page)
+
+                    retry_ctrl = await self.find_ticket_select(page, ticket_index)
+                    if retry_ctrl:
+                        r_tag = await retry_ctrl.evaluate("el => el.tagName.toLowerCase()")
+                        if r_tag == "select":
+                            await self._robust_select_quantity(retry_ctrl, requested_qty)
+                        else:
+                            await self._select_mui_combobox_quantity(page, retry_ctrl, requested_qty)
+
+                        await human_sleep(self.config.after_click_sleep_ms)
+                        r_add_btn = await self.find_add_button(page)
+                        if r_add_btn:
+                            await r_add_btn.click(timeout=self.config.click_timeout)
+                            await human_sleep((1000, 2000))
+                            if await self.detector.is_slider_captcha(page):
+                                LOGGER.info("DataDome slider appeared again after reload. Repeating solve...")
+                                retry_solved = await solve_datadome_slider(page)
+                                if not retry_solved:
+                                    LOGGER.error("DataDome slider could not be resolved after page reload retry.")
+                                    return False, 0, "Заблокировано капчей (DataDome: слайдер не решен)"
+                                else:
+                                    if not await self.detector.is_cart_page(page):
+                                        r_add_btn2 = await self.find_add_button(page)
+                                        if r_add_btn2:
+                                            await r_add_btn2.click(timeout=self.config.click_timeout)
+                                            await human_sleep((1000, 2000))
+                                    if await self.detector.is_cart_page(page):
+                                        return True, selected_qty, "Успешно добавлено в корзину"
+                except Exception as retry_err:
+                    LOGGER.warning(f"Error during DataDome slider page reload retry: {retry_err}")
+                    return False, 0, f"Ошибка при повторной попытке после слайдера: {retry_err}"
 
         # Check if Google reCAPTCHA v2 challenge appeared!
         if await is_recaptcha_challenge_visible(page):
@@ -739,7 +807,13 @@ class EtixCartHandler:
         return False, 0, "Не удалось подтвердить добавление в корзину (страница корзины не открылась)"
 
     async def clear_cart(self, page: Page) -> None:
-        """Release tickets by clearing the shopping cart."""
+        """
+        Release tickets by clearing the shopping cart using the 3-line cascade:
+        - Line 1: Attempt native DataDome slider solve directly on the cart page.
+        - Line 2: If slider solve fails or cannot be bypassed, clear session cookies via context.clear_cookies()
+                  to detach the worker from the locked cart session.
+        - Line 3: Ensure session cookies are wiped cleanly after cart release for subsequent show checks.
+        """
         # Auto-accept JavaScript confirmation dialogs
         def handle_dialog(dialog):
             asyncio.create_task(dialog.accept())
@@ -766,6 +840,34 @@ class EtixCartHandler:
                     await btn.click(timeout=2000)
                     await asyncio.sleep(1.0)
 
+                    # Line 1: Check if DataDome slider appeared upon clicking clear cart!
+                    if await self.detector.is_slider_captcha(page):
+                        LOGGER.warning("DataDome slider challenge appeared upon clicking 'Clear Shopping Cart'!")
+                        slider_solved = await solve_datadome_slider(page)
+                        if slider_solved:
+                            LOGGER.info("DataDome slider solved during cart clearance! Verifying release...")
+                            await asyncio.sleep(1.0)
+                            # Re-confirm clear cart if still on cart page with visible clear button
+                            try:
+                                if await btn.is_visible(timeout=800):
+                                    LOGGER.info("Re-confirming 'Clear Shopping Cart' after solving slider...")
+                                    page.once("dialog", handle_dialog)
+                                    await btn.click(timeout=1500)
+                                    await asyncio.sleep(1.0)
+                            except Exception:
+                                pass
+                        else:
+                            LOGGER.warning(
+                                "DataDome slider could not be resolved during cart clear. "
+                                "Applying Line 2 Fallback: Clearing session cookies to detach from stuck cart."
+                            )
+                            try:
+                                await page.context.clear_cookies()
+                                LOGGER.info("Cleared session cookies after failed slider on cart.")
+                            except Exception:
+                                pass
+                            return
+
                     # Check for modal confirmation (e.g. Bootstrap / MUI modal "Are you sure?")
                     confirm_selectors = [
                         ".modal button:has-text('Yes')",
@@ -780,12 +882,24 @@ class EtixCartHandler:
                             if await c_btn.is_visible(timeout=1000):
                                 await c_btn.click(timeout=1500)
                                 await asyncio.sleep(0.5)
+
+                                # Check if slider appeared after modal confirmation click
+                                if await self.detector.is_slider_captcha(page):
+                                    LOGGER.warning("DataDome slider appeared after confirming modal clear!")
+                                    m_solved = await solve_datadome_slider(page)
+                                    if not m_solved:
+                                        LOGGER.warning("Modal slider unsolved. Clearing session cookies...")
+                                        try:
+                                            await page.context.clear_cookies()
+                                        except Exception:
+                                            pass
+                                        return
                                 break
                         except Exception:
                             continue
 
                     LOGGER.info("Cleared entire cart via 'Clear Shopping Cart'.")
-                    return
+                    break
             except Exception:
                 continue
 
@@ -809,6 +923,16 @@ class EtixCartHandler:
                     if await btn.is_visible(timeout=500):
                         await btn.click(timeout=1000)
                         await asyncio.sleep(0.3)
+                        if await self.detector.is_slider_captcha(page):
+                            LOGGER.warning("DataDome slider appeared during item removal. Solving...")
+                            i_solved = await solve_datadome_slider(page)
+                            if not i_solved:
+                                LOGGER.warning("Individual item slider unsolved. Clearing cookies...")
+                                try:
+                                    await page.context.clear_cookies()
+                                except Exception:
+                                    pass
+                                return
             except Exception:
                 continue
 

@@ -386,12 +386,17 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
     LOGGER.info("Attempting humanized Drag & Drop on DataDome slider across all frames (up to 2 attempts)...")
 
     slider_targets = [
-        "[role='slider']",
+        ".slider",
+        "div.slider",
+        ".sliderContainer .slider",
+        ".sliderContainer > .slider",
         ".slider-button",
         "#sec-slider",
         ".sec-slider-btn",
         "#sec-slider-button",
-        ".slider",
+        "[role='slider']",
+        ".slider-handle",
+        ".slider-thumb",
         ".geetest_slider_button",
         "#sec-slider-btn",
         ".captcha-slider-btn",
@@ -400,12 +405,19 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         ".tc-slider-normal",
         "div[class*='slider']",
         "div[class*='handle']",
+        "div[class*='thumb']",
         "button[class*='slider']",
+        "button[role='slider']",
+        ".sec-cpt-slider",
+        ".slider_btn",
     ]
 
     track_targets = [
-        "#sec-slider-track",
         ".sliderContainer",
+        ".sliderbg",
+        "#sec-slider-track",
+        "#ddv1-captcha-container",
+        "#captcha-container",
         ".slider-track",
         ".track",
         ".sliderWrapper",
@@ -413,6 +425,9 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         "#track",
         ".slider-bg",
         "#sec-cpt-content",
+        ".slider-bar",
+        "div[class*='slider-container']",
+        "div[class*='slider_track']",
     ]
 
     for attempt in range(1, 3):
@@ -434,10 +449,11 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
         for scope in scopes:
             context = scope if scope is not None else page
+            w_timeout = 2000 if attempt == 1 else 1000
             for sel in slider_targets:
                 try:
                     loc = context.locator(sel).first
-                    if await loc.is_visible(timeout=300):
+                    if await loc.is_visible(timeout=w_timeout):
                         target_handle = loc
                         target_frame = scope
                         break
@@ -450,13 +466,13 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         if not target_handle:
             try:
                 iframe_loc = page.locator("iframe[src*='captcha-delivery'], iframe[src*='datadome']").first
-                if await iframe_loc.is_visible(timeout=500):
+                if await iframe_loc.is_visible(timeout=800):
                     c_frame = await iframe_loc.content_frame()
                     if c_frame:
                         for sel in slider_targets:
                             try:
                                 loc = c_frame.locator(sel).first
-                                if await loc.is_visible(timeout=300):
+                                if await loc.is_visible(timeout=1000):
                                     target_handle = loc
                                     target_frame = c_frame
                                     break
@@ -486,8 +502,23 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
                     continue
                 return False
 
-            # Find track
+            # Find target or track
             search_context = target_frame if target_frame is not None else page
+
+            # Priority 1: Check for explicit .sliderTarget (DataDome native target element)
+            box_target = None
+            for target_sel in [".sliderTarget", "div.sliderTarget", "i.sliderTargetIcon"]:
+                try:
+                    tgt_loc = search_context.locator(target_sel).first
+                    if await tgt_loc.is_visible(timeout=200):
+                        candidate_tgt = await tgt_loc.bounding_box()
+                        if candidate_tgt and candidate_tgt.get("width", 0) > 0:
+                            box_target = candidate_tgt
+                            break
+                except Exception:
+                    continue
+
+            # Priority 2: Find track container
             box_track = None
             for t_sel in track_targets:
                 try:
@@ -503,10 +534,15 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             start_x = box_handle["x"] + box_handle["width"] / 2.0
             start_y = box_handle["y"] + box_handle["height"] / 2.0
 
-            if box_track:
-                # Extra bumper push on attempt 2 to guarantee trigger
-                push = random.uniform(3.5, 6.0) if attempt == 2 else random.uniform(2.0, 4.5)
-                end_x = (box_track["x"] + box_track["width"]) - (box_handle["width"] / 2.0) + push
+            if box_target:
+                push = random.uniform(1.5, 3.5) if attempt == 2 else random.uniform(0.5, 2.0)
+                end_x = box_target["x"] + (box_target["width"] / 2.0) + push
+                LOGGER.info(f"Targeting DataDome native .sliderTarget at x={end_x:.1f}")
+            elif box_track:
+                track_right = box_track["x"] + box_track["width"]
+                pad_x = max(0.0, box_handle["x"] - box_track["x"])
+                push = random.uniform(2.5, 4.5) if attempt == 2 else random.uniform(1.0, 3.0)
+                end_x = (track_right - pad_x) - (box_handle["width"] / 2.0) + push
             else:
                 try:
                     p_width = await target_handle.evaluate(
@@ -572,25 +608,35 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             await page.mouse.up()
             LOGGER.info(f"[Attempt {attempt}/2] Completed slider drag motion. Checking validation...")
 
-            # Verification loop
-            for _ in range(6):
+            # Verification loop (up to 4.0s)
+            for _ in range(8):
                 await asyncio.sleep(0.5)
+                # 0. Fast-path check: DataDome success classes
                 try:
-                    if not await target_handle.is_visible(timeout=300):
-                        LOGGER.info("DataDome slider cleared successfully!")
+                    s_ctx = target_frame if target_frame is not None else page
+                    if await s_ctx.locator(".slider-success, .captcha-success").first.is_visible(timeout=150):
+                        LOGGER.info("DataDome slider solved successfully (found .slider-success/.captcha-success)!")
+                        return True
+                except Exception:
+                    pass
+
+                # 1. Primary check: handle became hidden/detached
+                try:
+                    if not await target_handle.is_visible(timeout=250):
+                        LOGGER.info("DataDome slider cleared successfully (handle hidden)!")
                         return True
                 except Exception:
                     LOGGER.info("DataDome slider handle detached / solved!")
                     return True
 
-                try:
-                    cookies = await page.context.cookies()
-                    dd_cookies = [c for c in cookies if "datadome" in c.get("name", "").lower()]
-                    if dd_cookies and any(len(c.get("value", "")) > 20 for c in dd_cookies):
-                        LOGGER.info(f"Found active DataDome session cookie: {dd_cookies[0]['name']}")
-                        return True
-                except Exception:
-                    pass
+                # 2. Check if iframe containing captcha closed or detached
+                if target_frame is not None:
+                    try:
+                        if target_frame.is_detached():
+                            LOGGER.info("DataDome captcha frame detached / solved!")
+                            return True
+                    except Exception:
+                        pass
 
             # If not solved and attempt == 1, pause before retry
             if attempt < 2:
@@ -604,7 +650,7 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
     # Final check after all attempts
     try:
-        if target_handle and not await target_handle.is_visible(timeout=500):
+        if target_handle and not await target_handle.is_visible(timeout=400):
             LOGGER.info("DataDome slider solved on final check!")
             return True
     except Exception:
