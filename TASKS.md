@@ -28,16 +28,21 @@
   - **Приоритет слайдера в `src/etix/checker.py`:** Проверка и решение слайдера выполняются ДО проверки бана страницы.
   - **Перехват асинхронного всплывания слайдера на шаге 8:** Добавлена проверка и решение слайдера при ожидании селекторов билетов и после перезагрузки.
   - **Надежность захвата в SunBrowser (`src/browser/human_actions.py`):** Внедрены `page.bring_to_front()`, `target_handle.focus()`, калибровка пауз `mousedown` ($80-160\text{мс}$) и финального `lock-in` ($150-250\text{мс}$).
+- [x] **Поддержка последовательных слайдеров DataDome (2+ подряд) и ускорение свайпа**
+  - **Диагностика и устранение проблемы:** При появлении второго слайдера подряд (после авторедиректа DataDome) чекер ошибочно переходил к сбросу кук и закрывал браузер из-за таймаута валидации (4 с).
+  - **Многоэтапное решение (Multi-Round Consecutive Sliders):** Внедрен цикл последовательного решения до 3 слайдеров подряд в шагах 4, 5, 8 `src/etix/checker.py` и в `src/etix/cart_handler.py` с сохранением сессионных кук и паузой синхронизации (1.8–2.6 с).
+  - **Оптимизированная кинематика свайпа:** Количество точек Безье снижено до 18–24 (14–19 на повторе), общее время протягивания сокращено до динамичных 380–500 мс.
+  - **Расширенное окно верификации:** Опрос валидации сетевого ответа `/captcha/check` через прокси увеличен до 7.0 с (шаг 300 мс).
 - [x] **Полное модульное и регрессионное самотестирование (Verification Gate)**
   - Все тесты проекта пройдены на 100% (GREEN):
-    - `tests/test_new_features.py`: 41/41 PASSED (добавлены `test_is_blocked_page_returns_false_when_slider_is_active`, `test_ensure_worker_ready_solves_asynchronous_slider_in_step_8`).
+    - `tests/test_new_features.py`: 42/42 PASSED (добавлен `test_consecutive_datadome_sliders_in_readiness`).
     - `tests/test_pool_and_delays.py`: 23/23 PASSED.
     - `tests/test_slider_and_sync.py`: 4/4 PASSED.
     - `tests/test_dynamic_group_switch.py`: 1/1 PASSED.
     - `tests/test_pagination_and_groups.py`: 3/3 PASSED.
     - `tests/test_updater.py`: 3/3 PASSED.
     - `tests/test_verification.py`: 9/9 PASSED.
-    - Итого: **84/84 теста зеленые**.
+    - Итого: **85/85 тестов зеленые**.
 
 ---
 

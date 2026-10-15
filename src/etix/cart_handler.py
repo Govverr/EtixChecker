@@ -505,38 +505,52 @@ class EtixCartHandler:
 
             await asyncio.sleep(0.3)
 
-        # Check if DataDome slider appeared upon clicking Add Tickets
-        if await self.detector.is_slider_captcha(page):
-            LOGGER.info("DataDome slider challenge appeared upon clicking 'Add Tickets'. Solving...")
+        # Check if DataDome slider appeared upon clicking Add Tickets (support consecutive rounds)
+        add_slider_round = 0
+        slider_solved = False
+        while add_slider_round < 2 and await self.detector.is_slider_captcha(page):
+            add_slider_round += 1
+            LOGGER.info(f"DataDome slider challenge appeared upon clicking 'Add Tickets' (round {add_slider_round}/2). Solving...")
             slider_solved = await solve_datadome_slider(page)
-            if slider_solved:
-                LOGGER.info("DataDome slider solved successfully! Checking for cart redirection...")
-                # Dynamic poll for cart page (up to 6.0s)
-                c_deadline = asyncio.get_event_loop().time() + 6.0
-                poll_count = 0
-                while asyncio.get_event_loop().time() < c_deadline and poll_count < 20:
-                    poll_count += 1
-                    if await self.detector.is_cart_page(page):
-                        return True, selected_qty, "Успешно добавлено в корзину"
-                    if await self.detector.is_captcha_required_error(page):
-                        break
-                    await asyncio.sleep(0.3)
+            if not slider_solved:
+                break
+            LOGGER.info(f"DataDome slider challenge #{add_slider_round} passed! Awaiting sync...")
+            await human_sleep((1800, 2400))
 
-                # If cart not reached automatically, re-click 'Add Tickets' with solved clearance token!
-                if not await self.detector.is_cart_page(page) and not await self.detector.is_captcha_required_error(page):
-                    LOGGER.info("Cart page not reached automatically after solving DataDome slider. Re-clicking 'Add Tickets'...")
-                    r_add_btn = await self.find_add_button(page)
-                    if r_add_btn:
-                        await r_add_btn.click(timeout=self.config.click_timeout)
-                        await human_sleep((1000, 2000))
-                        c_deadline = asyncio.get_event_loop().time() + 10.0
-                        poll_count2 = 0
-                        while asyncio.get_event_loop().time() < c_deadline and poll_count2 < 33:
-                            poll_count2 += 1
-                            if await self.detector.is_cart_page(page):
-                                return True, selected_qty, "Успешно добавлено в корзину"
-                            await asyncio.sleep(0.3)
-            else:
+        if slider_solved:
+            LOGGER.info("DataDome slider solved successfully! Checking for cart redirection...")
+            # Dynamic poll for cart page (up to 6.0s)
+            c_deadline = asyncio.get_event_loop().time() + 6.0
+            poll_count = 0
+            while asyncio.get_event_loop().time() < c_deadline and poll_count < 20:
+                poll_count += 1
+                if await self.detector.is_cart_page(page):
+                    return True, selected_qty, "Успешно добавлено в корзину"
+                if await self.detector.is_captcha_required_error(page):
+                    break
+                await asyncio.sleep(0.3)
+
+            # If cart not reached automatically, re-click 'Add Tickets' with solved clearance token!
+            if not await self.detector.is_cart_page(page) and not await self.detector.is_captcha_required_error(page):
+                LOGGER.info("Cart page not reached automatically after solving DataDome slider. Re-clicking 'Add Tickets'...")
+                r_add_btn = await self.find_add_button(page)
+                if r_add_btn:
+                    await r_add_btn.click(timeout=self.config.click_timeout)
+                    await human_sleep((1000, 1800))
+                    # Check if another slider challenge popped up after re-click
+                    if await self.detector.is_slider_captcha(page):
+                        LOGGER.info("DataDome slider challenge appeared after re-clicking 'Add Tickets'. Solving...")
+                        await solve_datadome_slider(page)
+                        await human_sleep((1500, 2200))
+
+                    c_deadline = asyncio.get_event_loop().time() + 10.0
+                    poll_count2 = 0
+                    while asyncio.get_event_loop().time() < c_deadline and poll_count2 < 33:
+                        poll_count2 += 1
+                        if await self.detector.is_cart_page(page):
+                            return True, selected_qty, "Успешно добавлено в корзину"
+                        await asyncio.sleep(0.3)
+        elif add_slider_round > 0 and not slider_solved:
                 LOGGER.warning(
                     "DataDome slider not resolved on initial in-page attempt. "
                     "Reloading page and retrying full add-to-cart solve cycle once..."
@@ -840,23 +854,30 @@ class EtixCartHandler:
                     await btn.click(timeout=2000)
                     await asyncio.sleep(1.0)
 
-                    # Line 1: Check if DataDome slider appeared upon clicking clear cart!
-                    if await self.detector.is_slider_captcha(page):
-                        LOGGER.warning("DataDome slider challenge appeared upon clicking 'Clear Shopping Cart'!")
+                    # Line 1: Check if DataDome slider appeared upon clicking clear cart (support consecutive rounds)
+                    c_slider_round = 0
+                    while c_slider_round < 2 and await self.detector.is_slider_captcha(page):
+                        c_slider_round += 1
+                        LOGGER.warning(f"DataDome slider challenge appeared upon clicking 'Clear Shopping Cart' (round {c_slider_round}/2)!")
                         slider_solved = await solve_datadome_slider(page)
-                        if slider_solved:
-                            LOGGER.info("DataDome slider solved during cart clearance! Verifying release...")
-                            await asyncio.sleep(1.0)
-                            # Re-confirm clear cart if still on cart page with visible clear button
-                            try:
-                                if await btn.is_visible(timeout=800):
-                                    LOGGER.info("Re-confirming 'Clear Shopping Cart' after solving slider...")
-                                    page.once("dialog", handle_dialog)
-                                    await btn.click(timeout=1500)
-                                    await asyncio.sleep(1.0)
-                            except Exception:
-                                pass
-                        else:
+                        if not slider_solved:
+                            break
+                        LOGGER.info(f"Cart clear slider challenge #{c_slider_round} solved! Waiting for sync...")
+                        await human_sleep((1800, 2400))
+
+                    if c_slider_round > 0 and not await self.detector.is_slider_captcha(page):
+                        LOGGER.info("DataDome slider solved during cart clearance! Verifying release...")
+                        await asyncio.sleep(1.0)
+                        # Re-confirm clear cart if still on cart page with visible clear button
+                        try:
+                            if await btn.is_visible(timeout=800):
+                                LOGGER.info("Re-confirming 'Clear Shopping Cart' after solving slider...")
+                                page.once("dialog", handle_dialog)
+                                await btn.click(timeout=1500)
+                                await asyncio.sleep(1.0)
+                        except Exception:
+                            pass
+                    elif c_slider_round > 0 and await self.detector.is_slider_captcha(page):
                             LOGGER.warning(
                                 "DataDome slider could not be resolved during cart clear. "
                                 "Applying Line 2 Fallback: Clearing session cookies to detach from stuck cart."

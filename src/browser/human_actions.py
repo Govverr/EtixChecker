@@ -588,38 +588,38 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             except Exception:
                 await page.mouse.move(start_x, start_y)
 
-            await asyncio.sleep(random.uniform(0.18, 0.32))
+            await asyncio.sleep(random.uniform(0.10, 0.18))
             await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.08, 0.16))
+            await asyncio.sleep(random.uniform(0.04, 0.08))
 
-            # Bezier points: slightly faster on attempt 2
-            steps = random.randint(24, 32) if attempt == 2 else random.randint(28, 38)
+            # Bezier points: snappier human swipe (attempt 1: 18-24 steps, attempt 2: 14-19 steps)
+            steps = random.randint(14, 19) if attempt == 2 else random.randint(18, 24)
             points = _generate_bezier_points(start_x, start_y, end_x, end_y, steps=steps)
             pause_milestone = random.randint(int(steps * 0.4), int(steps * 0.7))
 
             for idx, (px, py) in enumerate(points):
                 await page.mouse.move(px, py)
                 if idx == pause_milestone and attempt == 1:
-                    await asyncio.sleep(random.uniform(0.015, 0.030))
+                    await asyncio.sleep(random.uniform(0.010, 0.018))
                 else:
                     phase_ratio = idx / steps
-                    if phase_ratio < 0.25 or phase_ratio > 0.8:
-                        await asyncio.sleep(random.uniform(0.010, 0.020))
+                    if phase_ratio < 0.20 or phase_ratio > 0.85:
+                        await asyncio.sleep(random.uniform(0.006, 0.012))
                     else:
-                        await asyncio.sleep(random.uniform(0.006, 0.014))
+                        await asyncio.sleep(random.uniform(0.003, 0.007))
 
-            # Lock-in phase
-            await page.mouse.move(end_x + random.uniform(1.0, 3.0), end_y)
-            await asyncio.sleep(random.uniform(0.08, 0.15))
+            # Lock-in phase: brief natural settle before release
+            await page.mouse.move(end_x + random.uniform(0.8, 2.0), end_y)
+            await asyncio.sleep(random.uniform(0.04, 0.08))
             await page.mouse.move(end_x, end_y)
-            await asyncio.sleep(random.uniform(0.15, 0.25))
+            await asyncio.sleep(random.uniform(0.06, 0.12))
 
             await page.mouse.up()
             LOGGER.info(f"[Attempt {attempt}/2] Completed slider drag motion. Checking validation...")
 
-            # Verification loop (up to 4.0s)
-            for _ in range(8):
-                await asyncio.sleep(0.5)
+            # Verification loop (up to 7.0s with 300ms polling for network response over proxy)
+            for _ in range(23):
+                await asyncio.sleep(0.30)
                 # 0. Fast-path check: DataDome success classes
                 try:
                     s_ctx = target_frame if target_frame is not None else page
@@ -631,7 +631,7 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
                 # 1. Primary check: handle became hidden/detached
                 try:
-                    if not await target_handle.is_visible(timeout=250):
+                    if not await target_handle.is_visible(timeout=200):
                         LOGGER.info("DataDome slider cleared successfully (handle hidden)!")
                         return True
                 except Exception:
@@ -649,8 +649,8 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
 
             # If not solved and attempt == 1, pause before retry
             if attempt < 2:
-                LOGGER.info("Slider not cleared after first attempt. Retrying with alternate curve in 0.6s...")
-                await asyncio.sleep(0.6)
+                LOGGER.info("Slider not cleared after first attempt. Retrying with alternate curve in 0.5s...")
+                await asyncio.sleep(0.5)
 
         except Exception as exc:
             LOGGER.warning(f"Failed to execute slider drag on attempt {attempt}: {exc}")

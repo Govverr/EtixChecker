@@ -816,36 +816,51 @@ class EtixCheckEngine:
                     return None
 
                 # 4. FAST-PATH Pre-check: DataDome Slider & Hard Block
-                # Safety Invariant: Interactive slider MUST be checked first and given solve attempts
+                # Support multi-round consecutive sliders (e.g. 2 in a row or post-reload challenge)
+                max_consecutive_rounds = 3
+                round_num = 0
                 is_slider = await self.detector.is_slider_captcha(current_worker.page)
-                if is_slider:
-                    LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider detected on page entry. Solving...")
+
+                while is_slider and round_num < max_consecutive_rounds:
+                    round_num += 1
+                    LOGGER.info(
+                        f"[Worker #{current_worker.worker_index}] DataDome slider challenge #{round_num} detected. "
+                        f"Solving (consecutive solve {round_num}/{max_consecutive_rounds})..."
+                    )
                     solved = await solve_datadome_slider(current_worker.page)
-                    if (
-                        solved
-                        and not await self.detector.is_slider_captcha(current_worker.page)
-                        and not await self.detector.is_blocked_page(current_worker.page)
-                    ):
-                        LOGGER.info(f"[Worker #{current_worker.worker_index}] DataDome slider solved! Waiting for session sync...")
-                        await human_sleep((600, 1000))
-                        curr_u = (current_worker.page.url or "").lower()
-                        if "captcha" in curr_u or "datadome" in curr_u or (perf_id and perf_id not in curr_u):
-                            LOGGER.info(f"[Worker #{current_worker.worker_index}] Navigating back to event URL {show.url} after solving captcha...")
-                            try:
-                                await current_worker.page.goto(
-                                    show.url,
-                                    wait_until="domcontentloaded",
-                                    timeout=self.config.nav_timeout,
-                                )
-                            except Exception as re_nav_err:
-                                LOGGER.warning(f"[Worker #{current_worker.worker_index}] Post-captcha navigation warning: {re_nav_err}")
-                        is_slider = await self.detector.is_slider_captcha(current_worker.page)
-                        is_blocked = not is_slider and await self.detector.is_blocked_page(current_worker.page)
-                    else:
-                        is_slider = await self.detector.is_slider_captcha(current_worker.page)
-                        is_blocked = not is_slider and await self.detector.is_blocked_page(current_worker.page)
-                else:
-                    is_blocked = await self.detector.is_blocked_page(current_worker.page)
+                    if not solved:
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] Slider challenge #{round_num} was not solved."
+                        )
+                        break
+
+                    LOGGER.info(
+                        f"[Worker #{current_worker.worker_index}] Slider challenge #{round_num} passed! "
+                        f"Awaiting session sync & checking for follow-up challenges..."
+                    )
+                    # Wait for DataDome validation, DOM sync, or potential page reload
+                    await human_sleep((1800, 2600))
+
+                    # Check if page is currently navigating or stuck on raw captcha delivery page
+                    curr_u = (current_worker.page.url or "").lower()
+                    if ("captcha" in curr_u or "datadome" in curr_u) and (perf_id and perf_id not in curr_u):
+                        LOGGER.info(
+                            f"[Worker #{current_worker.worker_index}] Returning to event URL {show.url} after solving challenge #{round_num}..."
+                        )
+                        try:
+                            await current_worker.page.goto(
+                                show.url,
+                                wait_until="domcontentloaded",
+                                timeout=self.config.nav_timeout,
+                            )
+                            await human_sleep((1000, 1500))
+                        except Exception as re_nav_err:
+                            LOGGER.warning(f"[Worker #{current_worker.worker_index}] Post-captcha navigation warning: {re_nav_err}")
+
+                    # Check if another consecutive slider popped up after sync / reload
+                    is_slider = await self.detector.is_slider_captcha(current_worker.page)
+
+                is_blocked = not is_slider and await self.detector.is_blocked_page(current_worker.page)
 
                 # 5. Check if blocked (DataDome "Access Temporarily Blocked" or unsolved slider)
                 if is_blocked or is_slider:
@@ -864,14 +879,22 @@ class EtixCheckEngine:
                     except Exception as reload_err:
                         LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
 
-                    # After reload with cookie reset, wait 1.2s for asynchronous DataDome hydration
-                    await human_sleep((1000, 1500))
-                    still_slider = await self.detector.is_slider_captcha(current_worker.page)
-                    if still_slider:
-                        LOGGER.info(f"[Worker #{current_worker.worker_index}] Slider challenge appeared after reload. Attempting solve...")
-                        await solve_datadome_slider(current_worker.page)
-                        still_slider = await self.detector.is_slider_captcha(current_worker.page)
+                    # After reload with cookie reset, wait for asynchronous DataDome hydration
+                    await human_sleep((1200, 1800))
 
+                    # Support consecutive sliders after reload (up to 2 rounds)
+                    reload_slider_round = 0
+                    while reload_slider_round < 2 and await self.detector.is_slider_captcha(current_worker.page):
+                        reload_slider_round += 1
+                        LOGGER.info(
+                            f"[Worker #{current_worker.worker_index}] Slider challenge appeared after reload (round {reload_slider_round}/2). Solving..."
+                        )
+                        r_solved = await solve_datadome_slider(current_worker.page)
+                        if not r_solved:
+                            break
+                        await human_sleep((1800, 2400))
+
+                    still_slider = await self.detector.is_slider_captcha(current_worker.page)
                     still_blocked = not still_slider and await self.detector.is_blocked_page(current_worker.page)
 
                     if still_blocked or still_slider:
@@ -1004,21 +1027,24 @@ class EtixCheckEngine:
                     )
                     return current_worker
 
-                # Check if DataDome slider appeared asynchronously while awaiting controls
-                if await self.detector.is_slider_captcha(current_worker.page):
+                # Check if DataDome slider appeared asynchronously while awaiting controls (support consecutive rounds)
+                async_slider_round = 0
+                while async_slider_round < 2 and await self.detector.is_slider_captcha(current_worker.page):
+                    async_slider_round += 1
                     LOGGER.warning(
-                        f"[Worker #{current_worker.worker_index}] DataDome slider challenge appeared asynchronously while awaiting controls. Solving..."
+                        f"[Worker #{current_worker.worker_index}] DataDome slider challenge appeared asynchronously while awaiting controls (round {async_slider_round}/2). Solving..."
                     )
                     solved_async = await solve_datadome_slider(current_worker.page)
-                    if solved_async:
-                        LOGGER.info(f"[Worker #{current_worker.worker_index}] Asynchronous DataDome slider solved successfully!")
-                        await human_sleep((600, 1000))
-                        await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
-                        controls = await self.cart_handler.get_all_quantity_controls(current_worker.page)
-                        add_btn = await self.cart_handler.find_add_button(current_worker.page)
-                        if controls or add_btn:
-                            LOGGER.info(f"[Worker #{current_worker.worker_index}] Verified READY after solving slider on {show.url}")
-                            return current_worker
+                    if not solved_async:
+                        break
+                    LOGGER.info(f"[Worker #{current_worker.worker_index}] Asynchronous DataDome slider #{async_slider_round} solved! Waiting for sync...")
+                    await human_sleep((1800, 2400))
+                    await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
+                    controls = await self.cart_handler.get_all_quantity_controls(current_worker.page)
+                    add_btn = await self.cart_handler.find_add_button(current_worker.page)
+                    if controls or add_btn:
+                        LOGGER.info(f"[Worker #{current_worker.worker_index}] Verified READY after solving slider on {show.url}")
+                        return current_worker
 
                 # If on venue domain or etix but controls not yet visible, reload once
                 curr_url = current_worker.page.url or ""
@@ -1031,22 +1057,25 @@ class EtixCheckEngine:
                             wait_until="domcontentloaded",
                             timeout=self.config.nav_timeout,
                         )
-                        await human_sleep((500, 1000))
+                        await human_sleep((800, 1400))
                         await accept_cookies_if_present(current_worker.page)
                         await close_blocking_popups(current_worker.page)
                         await handle_empty_shopping_cart_conflict(current_worker.page, target_url=show.url)
                     except Exception:
                         pass
 
-                    # Check slider again after reload
-                    if await self.detector.is_slider_captcha(current_worker.page):
+                    # Check slider again after reload (support consecutive rounds)
+                    reload_slider_round2 = 0
+                    while reload_slider_round2 < 2 and await self.detector.is_slider_captcha(current_worker.page):
+                        reload_slider_round2 += 1
                         LOGGER.warning(
-                            f"[Worker #{current_worker.worker_index}] DataDome slider challenge active after reload. Solving..."
+                            f"[Worker #{current_worker.worker_index}] DataDome slider challenge active after reload (round {reload_slider_round2}/2). Solving..."
                         )
                         solved_re = await solve_datadome_slider(current_worker.page)
-                        if solved_re:
-                            await human_sleep((600, 1000))
-                            await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
+                        if not solved_re:
+                            break
+                        await human_sleep((1800, 2400))
+                        await self.detector.switch_to_price_level_if_seating_chart(current_worker.page)
 
                     controls = await self.cart_handler.get_all_quantity_controls(current_worker.page)
                     add_btn = await self.cart_handler.find_add_button(current_worker.page)
