@@ -337,7 +337,10 @@ class EtixDetector:
         try:
             block_hdr = page.locator(
                 "h1:has-text('Access Temporarily Blocked'), h2:has-text('Access Temporarily Blocked'), "
-                "p:has-text('Access Temporarily Blocked'), title:has-text('Access Temporarily Blocked')"
+                "p:has-text('Access Temporarily Blocked'), title:has-text('Access Temporarily Blocked'), "
+                "text='Access Temporarily Blocked', "
+                "text=/To help protect our platform from automated traffic/i, "
+                "text=/our security systems have temporarily restricted access/i"
             ).first
             if await block_hdr.is_visible(timeout=150):
                 return True
@@ -488,13 +491,18 @@ class EtixDetector:
 
     async def is_captcha_required_error(self, page: Page) -> bool:
         """
-        Check whether page displays Etix 'Response to CAPTCHA is required' / SYS-BS-004 error.
+        Check whether page displays Etix captcha error:
+        - SYS-BS-004: 'Response to CAPTCHA is required. Please go back and try again.'
+        - SYS-BS-003: 'The CAPTCHA has expired. Please click the button and try a new CAPTCHA.'
         """
         try:
             err_loc = page.locator(
                 "text=/Response to CAPTCHA is required/i, "
+                "text=/The CAPTCHA has expired/i, "
+                "text=/try a new CAPTCHA/i, "
                 "text=/SYS-BS-004/i, "
-                "text=/Status Code:\\s*SYS-BS-004/i"
+                "text=/SYS-BS-003/i, "
+                "text=/Status Code:\\s*SYS-BS-(003|004)/i"
             ).first
             if await err_loc.is_visible(timeout=200):
                 return True
@@ -503,7 +511,12 @@ class EtixDetector:
 
         try:
             body_text = await page.inner_text("body", timeout=300)
-            if "SYS-BS-004" in body_text or "Response to CAPTCHA is required" in body_text:
+            if any(k in body_text for k in [
+                "SYS-BS-004", "SYS-BS-003",
+                "Response to CAPTCHA is required",
+                "The CAPTCHA has expired",
+                "try a new CAPTCHA",
+            ]):
                 return True
         except Exception:
             pass

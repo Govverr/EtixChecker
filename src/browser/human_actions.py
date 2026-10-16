@@ -233,19 +233,25 @@ async def handle_empty_shopping_cart_conflict(
 
 async def handle_captcha_required_back(page: Page, target_url: Optional[str] = None) -> bool:
     """
-    Handle Etix 'Response to CAPTCHA is required. Please go back and try again. Status Code: SYS-BS-004':
+    Handle Etix captcha error pages:
+    - SYS-BS-004: 'Response to CAPTCHA is required. Please go back and try again. Status Code: SYS-BS-004'
+    - SYS-BS-003: 'The CAPTCHA has expired. Please click the button and try a new CAPTCHA. Status Code: SYS-BS-003'
     1. Check if error is present on page.
-    2. Click the orange 'Back' button to return to the performance selection form.
+    2. Click the 'Back' button (green or orange) to return to the performance selection form.
     3. Fallback to page.go_back() or direct navigation to target_url if button click fails.
     4. Wait for page hydration and return True once back on event page.
     """
     try:
         has_error = False
+        detected_code = "SYS-BS"
         try:
             err_loc = page.locator(
                 "text=/Response to CAPTCHA is required/i, "
+                "text=/The CAPTCHA has expired/i, "
+                "text=/try a new CAPTCHA/i, "
                 "text=/SYS-BS-004/i, "
-                "text=/Status Code:\\s*SYS-BS-004/i"
+                "text=/SYS-BS-003/i, "
+                "text=/Status Code:\\s*SYS-BS-(003|004)/i"
             ).first
             if await err_loc.is_visible(timeout=300):
                 has_error = True
@@ -255,24 +261,36 @@ async def handle_captcha_required_back(page: Page, target_url: Optional[str] = N
         if not has_error:
             try:
                 body_lower = (await page.inner_text("body", timeout=300)).lower()
-                if "sys-bs-004" in body_lower or "response to captcha is required" in body_lower:
+                if any(k in body_lower for k in [
+                    "sys-bs-004", "sys-bs-003",
+                    "response to captcha is required",
+                    "the captcha has expired",
+                    "try a new captcha",
+                ]):
                     has_error = True
+                    if "sys-bs-003" in body_lower or "the captcha has expired" in body_lower:
+                        detected_code = "SYS-BS-003"
+                    elif "sys-bs-004" in body_lower:
+                        detected_code = "SYS-BS-004"
             except Exception:
                 pass
 
         if not has_error:
             return False
 
-        LOGGER.warning("Detected SYS-BS-004 error page. Attempting to click 'Back' button...")
+        LOGGER.warning(f"Detected {detected_code} error page. Attempting to click 'Back' button...")
 
         back_selectors = [
             "button:has-text('Back')",
             "input[value='Back' i]",
             "a:has-text('Back')",
+            "button.btn:has-text('Back')",
+            "a.btn:has-text('Back')",
+            ".btn:has-text('Back')",
+            "[role='button']:has-text('Back')",
             "button[value='Back' i]",
             "input[type='button'][value*='Back' i]",
             "input[type='submit'][value*='Back' i]",
-            ".btn:has-text('Back')",
             "text=/^Back$/i",
         ]
 
@@ -309,7 +327,11 @@ async def handle_captcha_required_back(page: Page, target_url: Optional[str] = N
         still_on_error = False
         try:
             body_now = (await page.inner_text("body", timeout=400)).lower()
-            if "sys-bs-004" in body_now and "response to captcha is required" in body_now:
+            if any(k in body_now for k in [
+                "sys-bs-004", "sys-bs-003",
+                "response to captcha is required",
+                "the captcha has expired",
+            ]):
                 still_on_error = True
         except Exception:
             pass
@@ -322,7 +344,7 @@ async def handle_captcha_required_back(page: Page, target_url: Optional[str] = N
             except Exception:
                 pass
 
-        LOGGER.info("Successfully recovered from SYS-BS-004 error page via 'Back'.")
+        LOGGER.info(f"Successfully recovered from {detected_code} error page via 'Back'.")
         return True
 
     except Exception as exc:
@@ -331,27 +353,51 @@ async def handle_captcha_required_back(page: Page, target_url: Optional[str] = N
 
 
 
+async def _human_mouse_approach(page: Page, target_x: float, target_y: float) -> None:
+    """
+    Move the mouse cursor smoothly from a natural screen position to the slider handle.
+    Simulates genuine user eye-tracking and hand movement approaching the challenge.
+    """
+    try:
+        vp = page.viewport_size or {"width": 1280, "height": 800}
+        # Start from a realistic position in viewport (e.g. upper-middle area where user was reading)
+        start_px = random.uniform(vp["width"] * 0.30, vp["width"] * 0.65)
+        start_py = random.uniform(vp["height"] * 0.20, vp["height"] * 0.50)
+
+        # Ensure start point is at least 120px away from target handle to produce an authentic approach arc
+        if abs(start_px - target_x) < 100:
+            start_px = target_x - random.uniform(140.0, 260.0)
+
+        steps = random.randint(12, 16)
+        approach_pts = _generate_bezier_points(start_px, start_py, target_x, target_y, steps=steps)
+        for ax, ay in approach_pts:
+            await page.mouse.move(ax, ay)
+            await asyncio.sleep(random.uniform(0.012, 0.022))
+    except Exception as exc:
+        LOGGER.debug(f"Mouse approach notice: {exc}")
+
+
 def _generate_bezier_points(
     start_x: float,
     start_y: float,
     end_x: float,
     end_y: float,
-    steps: int = 32,
+    steps: int = 42,
 ) -> List[Tuple[float, float]]:
     """
     Generate humanized drag points using a cubic Bezier curve with 3-phase kinematics:
     - Ease-In acceleration phase
-    - Cruise phase with realistic micro-jitter on Y-axis (±1 - 3px)
+    - Cruise phase with realistic dual-axis micro-jitter (X and Y axes)
     - Ease-Out deceleration phase near the target edge
     """
     points = []
     dx = end_x - start_x
     dy = end_y - start_y
 
-    # Control points with slight natural curvature
-    ctrl1_x = start_x + dx * random.uniform(0.22, 0.38)
+    # Control points with natural human curvature
+    ctrl1_x = start_x + dx * random.uniform(0.20, 0.35)
     ctrl1_y = start_y + random.uniform(-4.0, 4.0)
-    ctrl2_x = start_x + dx * random.uniform(0.65, 0.85)
+    ctrl2_x = start_x + dx * random.uniform(0.65, 0.82)
     ctrl2_y = end_y + random.uniform(-3.0, 3.0)
 
     for i in range(1, steps + 1):
@@ -363,24 +409,71 @@ def _generate_bezier_points(
         x = (inv ** 3) * start_x + 3 * (inv ** 2) * eased_t * ctrl1_x + 3 * inv * (eased_t ** 2) * ctrl2_x + (eased_t ** 3) * end_x
         y = (inv ** 3) * start_y + 3 * (inv ** 2) * eased_t * ctrl1_y + 3 * inv * (eased_t ** 2) * ctrl2_y + (eased_t ** 3) * end_y
 
-        # Micro-tremor along Y axis: larger in the middle, dampened at start and end
+        # Dual-axis micro-tremor (X and Y): higher during cruise phase, dampened at edges
         if 0.15 <= raw_t <= 0.88:
-            jitter_y = random.uniform(-2.2, 2.2)
+            jitter_y = random.uniform(-2.0, 2.0)
+            jitter_x = random.uniform(-0.8, 0.8)
         elif raw_t < 0.15:
-            jitter_y = random.uniform(-0.8, 0.8)
+            jitter_y = random.uniform(-0.6, 0.6)
+            jitter_x = random.uniform(-0.3, 0.3)
         else:
-            jitter_y = random.uniform(-0.4, 0.4) if i < steps else 0.0
+            jitter_y = random.uniform(-0.3, 0.3) if i < steps else 0.0
+            jitter_x = 0.0
 
-        points.append((x, y + jitter_y))
+        points.append((x + jitter_x, y + jitter_y))
 
     return points
 
 
-async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
+async def _find_active_slider_handle(page: Page, targets: List[str], timeout_ms: int = 1500) -> Tuple[Optional[Locator], Optional[Frame]]:
+    """Scan main page and all nested frames to locate an active, visible DataDome slider handle."""
+    frames_to_check: List[Optional[Frame]] = []
+    for frame in page.frames:
+        f_url = (frame.url or "").lower()
+        if "captcha" in f_url or "datadome" in f_url:
+            frames_to_check.insert(0, frame)
+        else:
+            frames_to_check.append(frame)
+
+    scopes = frames_to_check + [None]
+    for scope in scopes:
+        context = scope if scope is not None else page
+        for sel in targets:
+            try:
+                loc = context.locator(sel).first
+                if await loc.is_visible(timeout=timeout_ms):
+                    return loc, scope
+            except Exception:
+                continue
+
+    # Fallback to explicit iframe locator
+    try:
+        iframe_loc = page.locator("iframe[src*='captcha-delivery'], iframe[src*='datadome']").first
+        if await iframe_loc.is_visible(timeout=min(timeout_ms, 600)):
+            c_frame = await iframe_loc.content_frame()
+            if c_frame:
+                for sel in targets:
+                    try:
+                        loc = c_frame.locator(sel).first
+                        if await loc.is_visible(timeout=min(timeout_ms, 600)):
+                            return loc, c_frame
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    return None, None
+
+
+async def solve_datadome_slider(
+    page: Page,
+    timeout_ms: int = 5000,
+    reload_first: bool = True,
+) -> bool:
     """
     Detects and smoothly solves the DataDome slider challenge across all frames (main and iframes)
-    using humanized Bezier mouse motion with bio-realistic hesitation pauses.
-    Performs up to 2 attempts with alternate trajectories before giving up.
+    using bio-kinematic Bezier mouse motion with approach trajectory, dual-axis tremor, and overshoot.
+    If reload_first=True, executes a soft reload first to test if the challenge clears without interaction.
     Returns True if solved and verified, False otherwise.
     """
     LOGGER.info("Attempting humanized Drag & Drop on DataDome slider across all frames (up to 2 attempts)...")
@@ -445,6 +538,27 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
     except Exception:
         pass
 
+    # 0.5. User Policy: Soft reload first before attempting to drag
+    if reload_first:
+        initial_handle, _ = await _find_active_slider_handle(page, slider_targets, timeout_ms=150)
+        if initial_handle:
+            LOGGER.info("DataDome slider challenge encountered. Executing soft reload first per policy...")
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=12000)
+                await asyncio.sleep(random.uniform(1.2, 1.8))
+                await accept_cookies_if_present(page, timeout_ms=300)
+                await close_blocking_popups(page, timeout_ms=300)
+            except Exception as re_err:
+                LOGGER.debug(f"Pre-solve reload notice: {re_err}")
+
+            # Re-check if slider cleared upon reload
+            recheck_handle, _ = await _find_active_slider_handle(page, slider_targets, timeout_ms=200)
+            if not recheck_handle:
+                LOGGER.info("DataDome slider challenge cleared after soft reload! Proceeding without dragging.")
+                return True
+
+            LOGGER.info("DataDome slider still present after soft reload. Proceeding with bio-kinematic solve...")
+
     for attempt in range(1, 3):
         LOGGER.info(f"Executing DataDome slider solve attempt {attempt}/2...")
         try:
@@ -452,53 +566,8 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
         except Exception:
             pass
 
-        target_handle = None
-        target_frame: Optional[Frame] = None
-
-        # Step 1: Scan frames prioritizing captcha-delivery / datadome iframes
-        frames_to_check: List[Optional[Frame]] = []
-        for frame in page.frames:
-            f_url = (frame.url or "").lower()
-            if "captcha" in f_url or "datadome" in f_url:
-                frames_to_check.insert(0, frame)
-            else:
-                frames_to_check.append(frame)
-
-        scopes = frames_to_check + [None]
-
-        for scope in scopes:
-            context = scope if scope is not None else page
-            w_timeout = 2000 if attempt == 1 else 1000
-            for sel in slider_targets:
-                try:
-                    loc = context.locator(sel).first
-                    if await loc.is_visible(timeout=w_timeout):
-                        target_handle = loc
-                        target_frame = scope
-                        break
-                except Exception:
-                    continue
-            if target_handle:
-                break
-
-        # Check explicit iframe if needed
-        if not target_handle:
-            try:
-                iframe_loc = page.locator("iframe[src*='captcha-delivery'], iframe[src*='datadome']").first
-                if await iframe_loc.is_visible(timeout=800):
-                    c_frame = await iframe_loc.content_frame()
-                    if c_frame:
-                        for sel in slider_targets:
-                            try:
-                                loc = c_frame.locator(sel).first
-                                if await loc.is_visible(timeout=1000):
-                                    target_handle = loc
-                                    target_frame = c_frame
-                                    break
-                            except Exception:
-                                continue
-            except Exception:
-                pass
+        w_timeout = 2000 if attempt == 1 else 1000
+        target_handle, target_frame = await _find_active_slider_handle(page, slider_targets, timeout_ms=w_timeout)
 
         if not target_handle:
             # Check if during wait the slider was solved or controls became active!
@@ -510,7 +579,6 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
                 if await page.locator(".slider-success, .captcha-success").first.is_visible(timeout=100):
                     LOGGER.info("DataDome slider solved successfully (found .slider-success/.captcha-success)!")
                     return True
-
             except Exception:
                 pass
 
@@ -554,9 +622,9 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             box_track = None
             for t_sel in track_targets:
                 try:
-                    t_loc = search_context.locator(t_sel).first
-                    if await t_loc.is_visible(timeout=200):
-                        candidate_box = await t_loc.bounding_box()
+                    track_loc = search_context.locator(t_sel).first
+                    if await track_loc.is_visible(timeout=200):
+                        candidate_box = await track_loc.bounding_box()
                         if candidate_box and candidate_box.get("width", 0) > box_handle["width"]:
                             box_track = candidate_box
                             break
@@ -610,38 +678,45 @@ async def solve_datadome_slider(page: Page, timeout_ms: int = 5000) -> bool:
             except Exception:
                 pass
 
-            # Hover to handle
-            try:
-                await target_handle.hover(timeout=1500)
-            except Exception:
-                await page.mouse.move(start_x, start_y)
+            # Phase 1: Natural approach from realistic screen position
+            await _human_mouse_approach(page, start_x, start_y)
 
-            await asyncio.sleep(random.uniform(0.10, 0.18))
+            # Phase 2: Natural visual pause over handle before pressing down
+            await asyncio.sleep(random.uniform(0.12, 0.22))
             await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.04, 0.08))
+            # Phase 3: Grip hold before motion starts
+            await asyncio.sleep(random.uniform(0.06, 0.12))
 
-            # Bezier points: snappier human swipe (attempt 1: 18-24 steps, attempt 2: 14-19 steps)
-            steps = random.randint(14, 19) if attempt == 2 else random.randint(18, 24)
+            # Phase 4: Human-speed drag trajectory (38-48 steps, ~750-950ms total)
+            steps = random.randint(38, 48) if attempt == 1 else random.randint(32, 40)
             points = _generate_bezier_points(start_x, start_y, end_x, end_y, steps=steps)
-            pause_milestone = random.randint(int(steps * 0.4), int(steps * 0.7))
+            pause_milestone = random.randint(int(steps * 0.45), int(steps * 0.65))
 
             for idx, (px, py) in enumerate(points):
                 await page.mouse.move(px, py)
                 if idx == pause_milestone and attempt == 1:
-                    await asyncio.sleep(random.uniform(0.010, 0.018))
+                    # Realistic mid-drag micro-hesitation (eye tracking)
+                    await asyncio.sleep(random.uniform(0.025, 0.045))
                 else:
                     phase_ratio = idx / steps
-                    if phase_ratio < 0.20 or phase_ratio > 0.85:
-                        await asyncio.sleep(random.uniform(0.006, 0.012))
+                    if phase_ratio < 0.20 or phase_ratio > 0.80:
+                        await asyncio.sleep(random.uniform(0.018, 0.026))
                     else:
-                        await asyncio.sleep(random.uniform(0.003, 0.007))
+                        await asyncio.sleep(random.uniform(0.012, 0.018))
 
-            # Lock-in phase: brief natural settle before release
-            await page.mouse.move(end_x + random.uniform(0.8, 2.0), end_y)
+            # Phase 5: Natural overshoot & elastic settle
+            # Real hands push slightly past the target, then bounce back
+            overshoot_x = end_x + random.uniform(2.0, 4.0)
+            await page.mouse.move(overshoot_x, end_y)
+            await asyncio.sleep(random.uniform(0.05, 0.09))
+
+            # Bounce back to target
+            settle_x = end_x + random.uniform(0.4, 1.2)
+            await page.mouse.move(settle_x, end_y)
             await asyncio.sleep(random.uniform(0.04, 0.08))
-            await page.mouse.move(end_x, end_y)
-            await asyncio.sleep(random.uniform(0.06, 0.12))
 
+            # Phase 6: Final lock-in hold before release
+            await asyncio.sleep(random.uniform(0.14, 0.22))
             await page.mouse.up()
             LOGGER.info(f"[Attempt {attempt}/2] Completed slider drag motion. Checking validation...")
 

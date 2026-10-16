@@ -465,9 +465,9 @@ class EtixCartHandler:
                 LOGGER.info("Tax scheme conflict detected during dynamic wait.")
                 break
 
-            # 3b. SYS-BS-004 "Response to CAPTCHA is required" error detected
+            # 3b. SYS-BS-003 / SYS-BS-004 captcha error detected
             if await self.detector.is_captcha_required_error(page):
-                LOGGER.warning("SYS-BS-004 error detected during dynamic wait.")
+                LOGGER.warning("Captcha error (SYS-BS-003 / SYS-BS-004) detected during dynamic wait.")
                 break
 
             # 4. Explicit error banner indicating sold out or per-order limit
@@ -676,10 +676,10 @@ class EtixCartHandler:
                     if await self.detector.is_cart_page(page):
                         return True, selected_qty, "Успешно добавлено в корзину"
 
-        # Check for Etix SYS-BS-004 error ("Response to CAPTCHA is required. Please go back and try again.")
+        # Check for Etix SYS-BS-003 / SYS-BS-004 error ("The CAPTCHA has expired" / "Response to CAPTCHA is required")
         if await self.detector.is_captcha_required_error(page):
             LOGGER.warning(
-                "SYS-BS-004 ('Response to CAPTCHA is required') error detected after Add Tickets. "
+                "Captcha error (SYS-BS-003 / SYS-BS-004) detected after Add Tickets. "
                 "Recovering: clicking 'Back' and re-adding tickets..."
             )
             back_ok = await handle_captcha_required_back(page)
@@ -722,15 +722,15 @@ class EtixCartHandler:
                         r_deadline = asyncio.get_event_loop().time() + 12.0
                         while asyncio.get_event_loop().time() < r_deadline:
                             if await self.detector.is_cart_page(page):
-                                LOGGER.info("Cart page reached successfully after SYS-BS-004 'Back' recovery!")
+                                LOGGER.info("Cart page reached successfully after captcha 'Back' recovery!")
                                 return True, selected_qty, "Успешно добавлено в корзину (после восстановления через 'Back')"
                             if await self.detector.is_captcha_required_error(page):
-                                LOGGER.error("SYS-BS-004 error appeared again after 'Back' retry.")
+                                LOGGER.error("Captcha error (SYS-BS-003/SYS-BS-004) appeared again after 'Back' retry.")
                                 return False, 0, "Заблокировано капчей (SYS-BS-004 repeated error)"
                             await asyncio.sleep(0.3)
             else:
-                LOGGER.warning("Failed to navigate back from SYS-BS-004 page.")
-                return False, 0, "Ошибка капчи (SYS-BS-004: не удалось вернуться по кнопке 'Back')"
+                LOGGER.warning("Failed to navigate back from captcha error page.")
+                return False, 0, "Ошибка капчи (не удалось вернуться по кнопке 'Back')"
 
         # Check for inventory exhaustion or per-order limit error message
         try:

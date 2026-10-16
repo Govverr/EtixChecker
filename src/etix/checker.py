@@ -1086,9 +1086,38 @@ class EtixCheckEngine:
                     )
                     return current_worker
 
+                is_slider_now = await self.detector.is_slider_captcha(current_worker.page)
+
+                # FAST-PATH: If page is hard-blocked by DataDome, hot-swap immediately without waiting 20s
+                if not is_slider_now and await self.detector.is_blocked_page(current_worker.page):
+                    LOGGER.warning(
+                        f"[Worker #{current_worker.worker_index}] Hard DataDome block ('Access Temporarily Blocked') "
+                        f"detected while awaiting controls for '{current_worker.profile.name}'. Hot-swapping immediately..."
+                    )
+                    self.profile_manager.record_blocked_profile(
+                        current_worker.profile, "DataDome: Access Temporarily Blocked"
+                    )
+                    if current_worker.profile.proxy_key:
+                        self.profile_manager.record_bad_proxy(
+                            current_worker.profile.proxy_key, "DataDome Blocked"
+                        )
+                    if swaps_done < max_profile_swaps and self.cdp_pool:
+                        new_w = await self.cdp_pool.replace_worker_with_reserve(
+                            current_worker, reason="DataDome: Access Temporarily Blocked"
+                        )
+                        if new_w:
+                            current_worker = new_w
+                            swaps_done += 1
+                            continue
+                    if self.cdp_pool:
+                        await self.cdp_pool.stop_and_remove_worker(
+                            current_worker, reason="DataDome: Access Temporarily Blocked"
+                        )
+                    return None
+
                 # Check if DataDome slider appeared asynchronously while awaiting controls (support consecutive rounds)
                 async_slider_round = 0
-                while async_slider_round < 2 and await self.detector.is_slider_captcha(current_worker.page):
+                while async_slider_round < 2 and is_slider_now:
                     async_slider_round += 1
                     LOGGER.warning(
                         f"[Worker #{current_worker.worker_index}] DataDome slider challenge appeared asynchronously while awaiting controls (round {async_slider_round}/2). Solving..."
@@ -1104,6 +1133,7 @@ class EtixCheckEngine:
                     if controls or add_btn:
                         LOGGER.info(f"[Worker #{current_worker.worker_index}] Verified READY after solving slider on {show.url}")
                         return current_worker
+                    is_slider_now = await self.detector.is_slider_captcha(current_worker.page)
 
                 # If on venue domain or etix but controls not yet visible, reload once
                 curr_url = current_worker.page.url or ""
@@ -1122,6 +1152,32 @@ class EtixCheckEngine:
                         await handle_empty_shopping_cart_conflict(current_worker.page, target_url=show.url)
                     except Exception:
                         pass
+
+                    # Check if page is blocked after reload
+                    if not await self.detector.is_slider_captcha(current_worker.page) and await self.detector.is_blocked_page(current_worker.page):
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] Page hard-blocked by DataDome after soft reload. Hot-swapping immediately..."
+                        )
+                        self.profile_manager.record_blocked_profile(
+                            current_worker.profile, "DataDome: Access Temporarily Blocked after reload"
+                        )
+                        if current_worker.profile.proxy_key:
+                            self.profile_manager.record_bad_proxy(
+                                current_worker.profile.proxy_key, "DataDome Blocked after reload"
+                            )
+                        if swaps_done < max_profile_swaps and self.cdp_pool:
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
+                                current_worker, reason="DataDome Blocked after reload"
+                            )
+                            if new_w:
+                                current_worker = new_w
+                                swaps_done += 1
+                                continue
+                        if self.cdp_pool:
+                            await self.cdp_pool.stop_and_remove_worker(
+                                current_worker, reason="DataDome Blocked after reload"
+                            )
+                        return None
 
                     # Check slider again after reload (support consecutive rounds)
                     reload_slider_round2 = 0
