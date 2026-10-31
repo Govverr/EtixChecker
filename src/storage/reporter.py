@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import pandas as pd
 from playwright.async_api import Page
 
@@ -38,6 +39,42 @@ class Reporter:
             return str(target_path)
         except Exception as exc:
             LOGGER.warning(f"Could not take screenshot for {show_name}: {exc}")
+            return None
+
+    async def save_dom_dump(
+        self,
+        page: Page,
+        show_name: str,
+        prefix: str = "fail",
+        reason: str = "",
+    ) -> Optional[str]:
+        """Capture and save complete page DOM HTML as diagnostic evidence upon error or block."""
+        try:
+            safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in show_name)[:30]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{prefix}_{safe_name}_{timestamp}.html"
+            target_path = self.screens_dir / filename
+
+            content = await page.content()
+            raw_url = getattr(page, "url", "unknown")
+            header = (
+                f"<!--\n"
+                f"  ETIX CRASH / FAILURE DOM DUMP\n"
+                f"  Show: {show_name}\n"
+                f"  URL: {raw_url}\n"
+                f"  Timestamp: {timestamp}\n"
+                f"  Reason: {reason or 'failure'}\n"
+                f"-->\n"
+            )
+            full_html = header + content
+            target_path.write_text(full_html, encoding="utf-8", errors="ignore")
+            size_kb = len(full_html.encode("utf-8", errors="ignore")) / 1024.0
+            LOGGER.info(
+                f"Saved failure DOM dump to {target_path} ({size_kb:.1f} KB) [Reason: {reason or 'failure'}]"
+            )
+            return str(target_path)
+        except Exception as exc:
+            LOGGER.warning(f"Could not save DOM dump for {show_name}: {exc}")
             return None
 
     def save_report(self, results: List[CheckResult]) -> Path:

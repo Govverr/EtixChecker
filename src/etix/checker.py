@@ -390,6 +390,10 @@ class EtixCheckEngine:
                 await self.detector.is_blocked_page(primary_worker.page)
                 or await self.detector.is_slider_captcha(primary_worker.page)
             )
+            await self.reporter.save_dom_dump(
+                primary_worker.page, show.name, prefix="blocked" if is_blocked else "failed",
+                reason="DataDome Blocked" if is_blocked else "Unresponsive/Inaccessible page"
+            )
             screen = await self.reporter.save_screenshot(
                 primary_worker.page, show.name, prefix="blocked" if is_blocked else "failed"
             )
@@ -434,6 +438,10 @@ class EtixCheckEngine:
                     details="Продажи завершены (Sales Ended)",
                     screenshot_path=screen,
                 )
+            await self.reporter.save_dom_dump(
+                primary_worker.page, show.name, prefix="no_controls",
+                reason="Ticket quantity controls not rendered"
+            )
             screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="no_controls")
             return CheckResult(
                 show_id=show.show_id,
@@ -872,6 +880,11 @@ class EtixCheckEngine:
                             f"[Worker #{current_worker.worker_index}] DataDome challenge #{round_num} is HARD-BLOCKED (verdict='bv'). "
                             f"Proxy/IP is blacklisted. Solving is futile. Executing deep storage wipe and hot-swapping..."
                         )
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="hard_block_bv",
+                            reason="DataDome Hard Block (verdict=bv)"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="hard_block_bv")
                         await deep_storage_wipe(current_worker.page)
                         self.profile_manager.record_blocked_profile(
                             current_worker.profile, "DataDome: Hard Block (verdict=bv)"
@@ -1037,6 +1050,11 @@ class EtixCheckEngine:
                             f"[Worker #{current_worker.worker_index}] Profile '{current_worker.profile.name}' (ID: {current_worker.profile.user_id}) "
                             f"STILL BLOCKED after 1 reload."
                         )
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="still_blocked",
+                            reason="DataDome Still Blocked after reload"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="still_blocked")
                         # Record blocked profile & bad proxy
                         self.profile_manager.record_blocked_profile(
                             current_worker.profile,
@@ -1171,6 +1189,11 @@ class EtixCheckEngine:
                         f"[Worker #{current_worker.worker_index}] Hard DataDome block ('Access Temporarily Blocked'){inc_msg} "
                         f"detected while awaiting controls for '{current_worker.profile.name}'. Executing deep storage wipe and hot-swapping..."
                     )
+                    await self.reporter.save_dom_dump(
+                        current_worker.page, show.name, prefix="blocked",
+                        reason=f"DataDome Hard Block{inc_msg}"
+                    )
+                    await self.reporter.save_screenshot(current_worker.page, show.name, prefix="blocked")
                     await deep_storage_wipe(current_worker.page)
                     self.profile_manager.record_blocked_profile(
                         current_worker.profile, f"DataDome: Access Temporarily Blocked{inc_msg}"
