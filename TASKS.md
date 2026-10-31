@@ -67,6 +67,15 @@
 
 ---
 
+- [x] **Комплексная система защиты от волновых банов DataDome (`feat/datadome-advanced-anti-ban`)**
+  - **CDP Deep Storage Wipe (`src/browser/human_actions.py`):** Функция `deep_storage_wipe` подключает отдельную CDP-сессию и вызывает команду `Storage.clearDataForOrigin` с параметром `storageTypes: "all"` для `etix.com`, `geo.captcha-delivery.com`, `ct.captcha-delivery.com` и `datadome.co`, а также `Network.clearBrowserCache` и `Network.clearBrowserCookies`. Это полностью воспроизводит операцию «chrome://settings/clearBrowserData -> All time -> Delete from this device», стирая `localStorage` (`ddSession`), `IndexedDB` и сетевой кэш.
+  - **Защита от CDP-утечек (`src/browser/cdp_pool.py`):** Drop-in импорт `rebrowser_playwright` и инъекция скрипта `add_init_script`, маскирующего артефакты V8 Inspector (`console.debug`, `Error.prepareStackTrace`, `navigator.webdriver`).
+  - **Ранняя детекция DataDome вердикта (`t: "bv"` vs `t: "fe"`):** Парсинг структуры `window.dd`, URL фреймов и содержимого скриптов. Если `verdict == "bv"` (Bad Verdict / заблокированный IP), чекер не тратит время на бесполезное протягивание слайдера, а немедленно выполняет Deep Storage Wipe, фиксирует заблокированный прокси и инициирует Hot-Swap.
+  - **Политика 2-х мягких перезагрузок с авто-подтверждением диалогов:** Чекер выполняет ровно 2 перезагрузки перед протягиванием слайдера. Если на шаге POST `/performance/sale/addSeat` появляется нативный диалог «Confirm Form Resubmission», слушатель `page.on("dialog")` автоматически нажимает «Continue» (`dialog.accept()`). Если слайдер исчезает на 1-й или 2-й попытке — протяжка пропускается.
+  - **Сессионный прогрев и волновой запуск (Wave Pacing):** Метод `_pre_warm_worker_session` проверяет наличие куки `datadome` и при ее отсутствии посещает главную страницу `https://www.etix.com` для сбора доверенной куки. В цикле барьера готовности добавлен межволновой джиттер 1.5–3.0 с каждые 4 воркера.
+  - **Расширенное логирование инцидентов:** Извлечение и логирование `Incident ID`, `Timestamp`, маски подсети `/24` и метода запроса.
+  - **100% Зеленое самотестирование (Verification Gate):** Добавлен тестовый набор `TestDataDomeAdvancedAntiBan` в `tests/test_new_features.py`. Все 58/58 тестов в `test_new_features.py` и все 27/27 тестов в остальных модулях (всего 85 тестов) пройдены на 100% (GREEN).
+
 ## ⏳ Планы на следующий чат (Upcoming Tasks)
 
 - [ ] **Боевое тестирование чекера на живых мероприятиях в GUI (`gui_app.py`)**

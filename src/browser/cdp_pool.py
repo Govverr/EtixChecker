@@ -5,13 +5,22 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from playwright.async_api import (
-    Browser,
-    BrowserContext,
-    Page,
-    Playwright,
-    async_playwright,
-)
+try:
+    from rebrowser_playwright.async_api import (
+        Browser,
+        BrowserContext,
+        Page,
+        Playwright,
+        async_playwright,
+    )
+except ImportError:
+    from playwright.async_api import (
+        Browser,
+        BrowserContext,
+        Page,
+        Playwright,
+        async_playwright,
+    )
 
 from src.adspower.client import AdsPowerClient
 from src.adspower.profile_manager import AdsPowerProfileManager
@@ -298,9 +307,42 @@ class CDPBrowserPool:
             page.set_default_navigation_timeout(self.config.nav_timeout)
             page.set_default_timeout(self.config.click_timeout)
 
+            # Mask CDP / Runtime.enable traps in console serialization and navigator
+            try:
+                await context.add_init_script("""
+                    (() => {
+                        try {
+                            const origDebug = console.debug;
+                            console.debug = function(...args) {
+                                return origDebug.apply(console, args);
+                            };
+                            Object.defineProperty(navigator, 'webdriver', {
+                                get: () => undefined,
+                                configurable: true
+                            });
+                        } catch (e) {}
+                    })();
+                """)
+            except Exception:
+                pass
+
+            # Global auto-confirm handler for native browser dialogs (e.g. Confirm Form Resubmission)
+            async def _default_dialog_handler(dialog):
+                LOGGER.info(
+                    f"[Worker #{worker_index}] Intercepted browser dialog: type='{dialog.type}', "
+                    f"message='{dialog.message}' -> Auto-accepting..."
+                )
+                try:
+                    await dialog.accept()
+                except Exception as diag_err:
+                    LOGGER.debug(f"Dialog accept error: {diag_err}")
+
+            page.on("dialog", _default_dialog_handler)
+
+            subnet = EtixDetector.extract_ip_subnet(profile.proxy_key)
             LOGGER.info(
                 f"[Worker #{worker_index}] Connected profile '{profile.name}' (ID: {profile.user_id}) "
-                f"via proxy {profile.proxy_key}"
+                f"via proxy {profile.proxy_key} (Subnet: {subnet})"
             )
 
             return BrowserWorker(

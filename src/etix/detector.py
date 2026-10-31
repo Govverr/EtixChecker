@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from playwright.async_api import Page
 
 from src.config.settings import AppConfig
@@ -522,4 +522,87 @@ class EtixDetector:
             pass
 
         return False
+
+    async def get_datadome_verdict(self, page: Page) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract DataDome verdict ('t': 'fe' vs 'bv') and challenge type ('rt': 'c' vs 'i').
+        - 'fe' = Front-End challenge (solvable slider or interstitial)
+        - 'bv' = Bad Verdict / Hard Blocked IP (solving slider will have no effect, IP is banned)
+        Returns: (verdict, challenge_type), e.g. ('bv', 'c') or ('fe', 'c') or (None, None).
+        """
+        verdict: Optional[str] = None
+        challenge_type: Optional[str] = None
+
+        # 1. Check frame URLs for ?t= or &t=
+        for f in page.frames:
+            f_url = (f.url or "")
+            if "captcha-delivery" in f_url or "datadome" in f_url:
+                m_t = re.search(r"[?&]t=([a-z]+)", f_url, re.I)
+                if m_t:
+                    verdict = m_t.group(1).lower()
+                m_rt = re.search(r"[?&]rt=([a-z]+)", f_url, re.I)
+                if m_rt:
+                    challenge_type = m_rt.group(1).lower()
+                if verdict:
+                    return verdict, challenge_type
+
+        # 2. Evaluate window.dd inside all frames
+        for f in page.frames:
+            try:
+                res = await f.evaluate("""() => {
+                    try {
+                        if (window.dd && typeof window.dd === 'object') {
+                            return { t: window.dd.t || null, rt: window.dd.rt || null };
+                        }
+                    } catch(e) {}
+                    return null;
+                }""")
+                if res and isinstance(res, dict) and res.get("t"):
+                    return str(res.get("t")).lower(), str(res.get("rt", "")).lower()
+            except Exception:
+                continue
+
+        # 3. Check page content for var dd = {...}
+        try:
+            content = await page.content()
+            m_dd = re.search(r"var\s+dd\s*=\s*\{([^}]+)\}", content)
+            if m_dd:
+                dd_body = m_dd.group(1)
+                m_t = re.search(r"['\"]?t['\"]?\s*:\s*['\"]([^'\"]+)['\"]", dd_body)
+                if m_t:
+                    verdict = m_t.group(1).lower()
+                m_rt = re.search(r"['\"]?rt['\"]?\s*:\s*['\"]([^'\"]+)['\"]", dd_body)
+                if m_rt:
+                    challenge_type = m_rt.group(1).lower()
+                if verdict:
+                    return verdict, challenge_type
+        except Exception:
+            pass
+
+        return verdict, challenge_type
+
+    async def get_block_incident_info(self, page: Page) -> Dict[str, str]:
+        """Extract DataDome block Incident ID and Timestamp for diagnostic logging."""
+        info = {"incident_id": "", "timestamp": ""}
+        try:
+            body_text = await page.inner_text("body", timeout=500)
+            id_m = re.search(r"ID:\s*([a-f0-9\-]{16,})", body_text, re.I)
+            if id_m:
+                info["incident_id"] = id_m.group(1).strip()
+            ts_m = re.search(r"Timestamp:\s*([^\r\n]+)", body_text, re.I)
+            if ts_m:
+                info["timestamp"] = ts_m.group(1).strip()
+        except Exception:
+            pass
+        return info
+
+    @staticmethod
+    def extract_ip_subnet(proxy_str: str) -> str:
+        """Extract IPv4 /24 subnet from proxy string (e.g. '185.220.101.45:8080' -> '185.220.101.0/24')."""
+        if not proxy_str:
+            return "unknown"
+        m = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}", proxy_str)
+        if m:
+            return f"{m.group(1)}.0/24"
+        return "unknown"
 
