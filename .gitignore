@@ -44,6 +44,7 @@ data/adspower_backup/
 AGENTS.md
 ERRORS.md
 PROJECT_CONTEXT.md
+PROJECT_KNOWLEDGE.md
 
 # Developer release utilities & CLI (local dev only)
 pack_release.bat
