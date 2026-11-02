@@ -474,6 +474,9 @@ class EtixGuiApp(ctk.CTk):
         self.btn_logs = self._create_action_btn("📁  Логи", lambda: self._open_folder(CONFIG.logs_dir))
         self.btn_logs.pack(side="left", padx=6)
 
+        self.btn_collect_logs = self._create_action_btn("📦  Собрать логи", self._on_collect_logs_clicked)
+        self.btn_collect_logs.pack(side="left", padx=6)
+
         self.btn_updates = self._create_action_btn("🔄  Проверить обновления", self._on_check_updates_clicked)
         self.btn_updates.pack(side="left", padx=6)
 
@@ -1337,6 +1340,22 @@ class EtixGuiApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_collect_logs_clicked(self) -> None:
+        """Collect logs, reports, and error dumps into a single ZIP archive on user's Desktop."""
+        self.btn_collect_logs.configure(state="disabled", text="⏳  Сборка...")
+        self._log("📦 Сборка диагностического архива логов и дампов...")
+
+        def worker():
+            try:
+                from src.utils.diagnostics import DiagnosticsCollector
+                zip_path = DiagnosticsCollector.collect_bundle()
+                DiagnosticsCollector.open_in_explorer(zip_path)
+                self.event_queue.put(("collect_logs_done", True, str(zip_path)))
+            except Exception as exc:
+                self.event_queue.put(("collect_logs_done", False, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _poll_queue(self) -> None:
         try:
             while True:
@@ -1418,6 +1437,22 @@ class EtixGuiApp(ctk.CTk):
                     else:
                         self._log(f"❌ Ошибка отката: {res_msg}")
                         messagebox.showerror("Ошибка отката", res_msg)
+
+                elif kind == "collect_logs_done":
+                    self.btn_collect_logs.configure(state="normal", text="📦  Собрать логи")
+                    ok, res_data = msg[1], msg[2]
+                    if ok:
+                        filename = Path(res_data).name
+                        self._log(f"📦 Архив логов успешно сформирован: {res_data}")
+                        messagebox.showinfo(
+                            "Сбор логов завершен",
+                            f"Диагностический архив успешно создан:\n\n{filename}\n\n"
+                            f"Файл сохранен на вашем Рабочем столе и открыт в Проводнике Windows.\n"
+                            f"Отправьте этот ZIP-файл разработчику для анализа."
+                        )
+                    else:
+                        self._log(f"❌ Ошибка сбора логов: {res_data}")
+                        messagebox.showerror("Ошибка сбора логов", f"Не удалось сформировать архив:\n{res_data}")
 
                 elif kind == "show_done":
                     res: CheckResult = msg[1]

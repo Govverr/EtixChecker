@@ -465,6 +465,134 @@ async def _find_active_slider_handle(page: Page, targets: List[str], timeout_ms:
     return None, None
 
 
+async def deep_storage_wipe(
+    page: Page,
+    origins: Optional[List[str]] = None,
+) -> bool:
+    """
+    Perform a complete deep wipe of browser storage, caches, and cookies via Chrome DevTools Protocol (CDP).
+    Emulates selecting 'Delete browsing data: All time' with all checkboxes enabled:
+    - Clears cookies, localStorage, sessionStorage, IndexedDB, ServiceWorkers, CacheStorage for target origins.
+    - Purges the browser network disk and memory cache.
+    Targets 'https://www.etix.com' and 'https://geo.captcha-delivery.com' by default.
+    """
+    if not origins:
+        origins = [
+            "https://www.etix.com",
+            "https://geo.captcha-delivery.com",
+            "https://ct.captcha-delivery.com",
+            "https://datadome.co",
+        ]
+
+    try:
+        cdp = await page.context.new_cdp_session(page)
+    except Exception as cdp_init_err:
+        LOGGER.debug(f"Could not open CDP session for deep_storage_wipe: {cdp_init_err}")
+        try:
+            await page.context.clear_cookies()
+            await page.evaluate("""() => {
+                try { localStorage.clear(); } catch(e) {}
+                try { sessionStorage.clear(); } catch(e) {}
+            }""")
+        except Exception:
+            pass
+        return False
+
+    wiped_origins = 0
+    try:
+        for origin in origins:
+            try:
+                await cdp.send("Storage.clearDataForOrigin", {
+                    "origin": origin,
+                    "storageTypes": "all",
+                })
+                wiped_origins += 1
+            except Exception as st_err:
+                LOGGER.debug(f"Storage.clearDataForOrigin notice for {origin}: {st_err}")
+
+        try:
+            await cdp.send("Network.clearBrowserCache")
+        except Exception:
+            pass
+        try:
+            await cdp.send("Network.clearBrowserCookies")
+        except Exception:
+            pass
+
+        LOGGER.info(
+            f"Deep storage wipe executed via CDP across {wiped_origins} origins "
+            f"(cleared cookies, localStorage, IndexedDB, ServiceWorkers, and network cache)."
+        )
+        return True
+    except Exception as wipe_err:
+        LOGGER.warning(f"Error during CDP deep storage wipe: {wipe_err}")
+        return False
+    finally:
+        try:
+            await cdp.detach()
+        except Exception:
+            pass
+
+
+async def _extract_datadome_verdict(page: Page) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract DataDome verdict ('t': 'fe' vs 'bv') and challenge type ('rt': 'c' vs 'i').
+    - 'fe' = Front-End challenge (solvable slider or interstitial)
+    - 'bv' = Bad Verdict / Hard Blocked IP (solving slider will have no effect, IP is banned)
+    Returns: (verdict, challenge_type), e.g. ('bv', 'c') or ('fe', 'c') or (None, None).
+    """
+    verdict: Optional[str] = None
+    challenge_type: Optional[str] = None
+
+    # 1. Check frame URLs for ?t= or &t=
+    for f in page.frames:
+        f_url = (f.url or "")
+        if "captcha-delivery" in f_url or "datadome" in f_url:
+            m_t = re.search(r"[?&]t=([a-z]+)", f_url, re.I)
+            if m_t:
+                verdict = m_t.group(1).lower()
+            m_rt = re.search(r"[?&]rt=([a-z]+)", f_url, re.I)
+            if m_rt:
+                challenge_type = m_rt.group(1).lower()
+            if verdict:
+                return verdict, challenge_type
+
+    # 2. Evaluate window.dd inside all frames
+    for f in page.frames:
+        try:
+            res = await f.evaluate("""() => {
+                try {
+                    if (window.dd && typeof window.dd === 'object') {
+                        return { t: window.dd.t || null, rt: window.dd.rt || null };
+                    }
+                } catch(e) {}
+                return null;
+            }""")
+            if res and isinstance(res, dict) and res.get("t"):
+                return str(res.get("t")).lower(), str(res.get("rt", "")).lower()
+        except Exception:
+            continue
+
+    # 3. Check page content for var dd = {...}
+    try:
+        content = await page.content()
+        m_dd = re.search(r"var\s+dd\s*=\s*\{([^}]+)\}", content)
+        if m_dd:
+            dd_body = m_dd.group(1)
+            m_t = re.search(r"['\"]?t['\"]?\s*:\s*['\"]([^'\"]+)['\"]", dd_body)
+            if m_t:
+                verdict = m_t.group(1).lower()
+            m_rt = re.search(r"['\"]?rt['\"]?\s*:\s*['\"]([^'\"]+)['\"]", dd_body)
+            if m_rt:
+                challenge_type = m_rt.group(1).lower()
+            if verdict:
+                return verdict, challenge_type
+    except Exception:
+        pass
+
+    return verdict, challenge_type
+
+
 async def solve_datadome_slider(
     page: Page,
     timeout_ms: int = 5000,
@@ -473,7 +601,7 @@ async def solve_datadome_slider(
     """
     Detects and smoothly solves the DataDome slider challenge across all frames (main and iframes)
     using bio-kinematic Bezier mouse motion with approach trajectory, dual-axis tremor, and overshoot.
-    If reload_first=True, executes a soft reload first to test if the challenge clears without interaction.
+    If reload_first=True, executes up to 2 soft reloads first with auto-confirm of resubmission dialogs.
     Returns True if solved and verified, False otherwise.
     """
     LOGGER.info("Attempting humanized Drag & Drop on DataDome slider across all frames (up to 2 attempts)...")
@@ -538,26 +666,76 @@ async def solve_datadome_slider(
     except Exception:
         pass
 
-    # 0.5. User Policy: Soft reload first before attempting to drag
+    # 0.1 Check DataDome verdict before attempting solve
+    early_verdict, early_rt = await _extract_datadome_verdict(page)
+    if early_verdict == "bv":
+        LOGGER.warning(
+            f"DataDome challenge has HARD-BLOCKED verdict (t='bv', rt='{early_rt}'). "
+            f"Proxy/IP is blacklisted by DataDome. Solving or reloading will have no effect."
+        )
+        return False
+    elif early_verdict == "fe":
+        LOGGER.info(f"DataDome challenge verdict is solvable (t='fe', rt='{early_rt}').")
+
+    # 0.5. User Policy: Exactly 2 soft reloads before attempting to drag
     if reload_first:
         initial_handle, _ = await _find_active_slider_handle(page, slider_targets, timeout_ms=150)
         if initial_handle:
-            LOGGER.info("DataDome slider challenge encountered. Executing soft reload first per policy...")
+            # Set up auto-confirm dialog handler to catch 'Confirm Form Resubmission' on POST pages
+            async def _auto_confirm_dialog(dialog):
+                LOGGER.info(
+                    f"Auto-confirming browser dialog during reload: type='{dialog.type}', "
+                    f"message='{dialog.message}' (Continue/Confirm)"
+                )
+                try:
+                    await dialog.accept()
+                except Exception as d_err:
+                    LOGGER.debug(f"Dialog accept error: {d_err}")
+
+            page.on("dialog", _auto_confirm_dialog)
             try:
-                await page.reload(wait_until="domcontentloaded", timeout=12000)
-                await asyncio.sleep(random.uniform(1.2, 1.8))
-                await accept_cookies_if_present(page, timeout_ms=300)
-                await close_blocking_popups(page, timeout_ms=300)
-            except Exception as re_err:
-                LOGGER.debug(f"Pre-solve reload notice: {re_err}")
+                for reload_attempt in range(1, 3):
+                    # Check if verdict became hard-blocked before reloading
+                    v_check, _ = await _extract_datadome_verdict(page)
+                    if v_check == "bv":
+                        LOGGER.warning(
+                            f"DataDome challenge has HARD-BLOCKED verdict (t='bv') on reload {reload_attempt}/2. "
+                            f"Aborting slider solve to trigger immediate Hot-Swap."
+                        )
+                        return False
 
-            # Re-check if slider cleared upon reload
-            recheck_handle, _ = await _find_active_slider_handle(page, slider_targets, timeout_ms=200)
-            if not recheck_handle:
-                LOGGER.info("DataDome slider challenge cleared after soft reload! Proceeding without dragging.")
-                return True
+                    LOGGER.info(f"DataDome slider challenge encountered. Executing soft reload {reload_attempt}/2 per policy...")
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=12000)
+                        await asyncio.sleep(random.uniform(1.2, 1.8))
+                        await accept_cookies_if_present(page, timeout_ms=300)
+                        await close_blocking_popups(page, timeout_ms=300)
+                    except Exception as re_err:
+                        LOGGER.debug(f"Pre-solve reload #{reload_attempt} notice: {re_err}")
 
-            LOGGER.info("DataDome slider still present after soft reload. Proceeding with bio-kinematic solve...")
+                    # Check if slider cleared upon reload
+                    recheck_handle, _ = await _find_active_slider_handle(page, slider_targets, timeout_ms=250)
+                    if not recheck_handle:
+                        LOGGER.info(
+                            f"DataDome slider challenge cleared after soft reload #{reload_attempt}! "
+                            f"Proceeding without dragging."
+                        )
+                        return True
+
+                    v_post, _ = await _extract_datadome_verdict(page)
+                    if v_post == "bv":
+                        LOGGER.warning(
+                            f"DataDome challenge verdict became HARD-BLOCKED (t='bv') after reload #{reload_attempt}. "
+                            f"Aborting slider solve to trigger immediate Hot-Swap."
+                        )
+                        return False
+
+                LOGGER.info("DataDome slider still present after 2 soft reloads. Proceeding with bio-kinematic solve...")
+            finally:
+                try:
+                    page.remove_listener("dialog", _auto_confirm_dialog)
+                except Exception:
+                    pass
 
     for attempt in range(1, 3):
         LOGGER.info(f"Executing DataDome slider solve attempt {attempt}/2...")

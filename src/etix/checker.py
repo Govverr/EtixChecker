@@ -17,6 +17,7 @@ from src.browser.cdp_pool import BrowserWorker, CDPBrowserPool
 from src.browser.human_actions import (
     accept_cookies_if_present,
     close_blocking_popups,
+    deep_storage_wipe,
     handle_empty_shopping_cart_conflict,
     human_sleep,
     is_recaptcha_challenge_visible,
@@ -389,6 +390,10 @@ class EtixCheckEngine:
                 await self.detector.is_blocked_page(primary_worker.page)
                 or await self.detector.is_slider_captcha(primary_worker.page)
             )
+            await self.reporter.save_dom_dump(
+                primary_worker.page, show.name, prefix="blocked" if is_blocked else "failed",
+                reason="DataDome Blocked" if is_blocked else "Unresponsive/Inaccessible page"
+            )
             screen = await self.reporter.save_screenshot(
                 primary_worker.page, show.name, prefix="blocked" if is_blocked else "failed"
             )
@@ -433,6 +438,10 @@ class EtixCheckEngine:
                     details="Продажи завершены (Sales Ended)",
                     screenshot_path=screen,
                 )
+            await self.reporter.save_dom_dump(
+                primary_worker.page, show.name, prefix="no_controls",
+                reason="Ticket quantity controls not rendered"
+            )
             screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="no_controls")
             return CheckResult(
                 show_id=show.show_id,
@@ -480,13 +489,17 @@ class EtixCheckEngine:
         )
         ready_tasks = []
         accumulated_nav_delay = 0.0
-        for w in selected_workers:
+        for idx, w in enumerate(selected_workers):
             # Primary worker was pre-loaded in Step 1, so no initial delay needed
             delay = 0.0 if w == primary_worker else accumulated_nav_delay
             if w != primary_worker:
-                accumulated_nav_delay += random.uniform(
-                    self.config.batch_nav_delay_ms[0], self.config.batch_nav_delay_ms[1]
-                ) / 1000.0
+                # Add wave jitter every 4 workers to prevent concurrent burst on same show URL
+                wave_jitter = random.uniform(1.5, 3.0) if (idx > 0 and idx % 4 == 0) else 0.0
+                accumulated_nav_delay += (
+                    random.uniform(
+                        self.config.batch_nav_delay_ms[0], self.config.batch_nav_delay_ms[1]
+                    ) / 1000.0 + wave_jitter
+                )
             ready_tasks.append(
                 self._ensure_worker_ready_for_show(w, show, initial_delay_s=delay)
             )
@@ -706,6 +719,41 @@ class EtixCheckEngine:
 
         await self.cart_handler.clear_cart(worker.page)
 
+    async def _pre_warm_worker_session(self, worker: BrowserWorker, base_url: str = "https://www.etix.com") -> bool:
+        """
+        Pre-warm a cold browser worker by visiting the base venue domain (etix.com)
+        to harvest a trusted DataDome clearance cookie before hitting specific ticket pages.
+        """
+        page = worker.page
+        try:
+            cookies = await worker.context.cookies([base_url])
+            has_dd = any(c.get("name") == "datadome" for c in cookies)
+            if has_dd:
+                return True
+
+            LOGGER.info(
+                f"[Worker #{worker.worker_index}] Pre-warming cold profile '{worker.profile.name}' on {base_url}..."
+            )
+            try:
+                await page.goto(base_url, wait_until="domcontentloaded", timeout=12000)
+                await human_sleep((1200, 2000))
+                await accept_cookies_if_present(page, timeout_ms=300)
+                cookies_after = await worker.context.cookies([base_url])
+                dd_cookie = next((c for c in cookies_after if c.get("name") == "datadome"), None)
+                if dd_cookie:
+                    LOGGER.info(
+                        f"[Worker #{worker.worker_index}] Pre-warming complete: harvested trusted datadome cookie "
+                        f"(len={len(dd_cookie.get('value', ''))})."
+                    )
+                else:
+                    LOGGER.info(f"[Worker #{worker.worker_index}] Pre-warming navigation complete on {base_url}.")
+                return True
+            except Exception as warm_err:
+                LOGGER.debug(f"[Worker #{worker.worker_index}] Pre-warming notice: {warm_err}")
+                return False
+        except Exception:
+            return False
+
     async def _ensure_worker_ready_for_show(
         self,
         worker: BrowserWorker,
@@ -776,6 +824,8 @@ class EtixCheckEngine:
                 )
 
                 if needs_nav:
+                    # Pre-warm cold profiles on base domain (etix.com) if datadome cookie is missing
+                    await self._pre_warm_worker_session(current_worker)
                     LOGGER.info(
                         f"[Worker #{current_worker.worker_index}] Navigating profile '{current_worker.profile.name}' to {show.url}..."
                     )
@@ -823,8 +873,42 @@ class EtixCheckEngine:
 
                 while is_slider and round_num < max_consecutive_rounds:
                     round_num += 1
+                    # Check DataDome verdict before solving
+                    v_verdict, v_rt = await self.detector.get_datadome_verdict(current_worker.page)
+                    if v_verdict == "bv":
+                        LOGGER.warning(
+                            f"[Worker #{current_worker.worker_index}] DataDome challenge #{round_num} is HARD-BLOCKED (verdict='bv'). "
+                            f"Proxy/IP is blacklisted. Solving is futile. Executing deep storage wipe and hot-swapping..."
+                        )
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="hard_block_bv",
+                            reason="DataDome Hard Block (verdict=bv)"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="hard_block_bv")
+                        await deep_storage_wipe(current_worker.page)
+                        self.profile_manager.record_blocked_profile(
+                            current_worker.profile, "DataDome: Hard Block (verdict=bv)"
+                        )
+                        if current_worker.profile.proxy_key:
+                            self.profile_manager.record_bad_proxy(
+                                current_worker.profile.proxy_key, "DataDome Blocked (verdict=bv)"
+                            )
+                        if swaps_done < max_profile_swaps and self.cdp_pool:
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
+                                current_worker, reason="DataDome Hard Block (verdict=bv)"
+                            )
+                            if new_w:
+                                current_worker = new_w
+                                swaps_done += 1
+                                continue
+                        if self.cdp_pool:
+                            await self.cdp_pool.stop_and_remove_worker(
+                                current_worker, reason="DataDome Hard Block (verdict=bv)"
+                            )
+                        return None
+
                     LOGGER.info(
-                        f"[Worker #{current_worker.worker_index}] DataDome slider challenge #{round_num} detected. "
+                        f"[Worker #{current_worker.worker_index}] DataDome slider challenge #{round_num} detected (verdict={v_verdict or 'standard'}). "
                         f"Solving (consecutive solve {round_num}/{max_consecutive_rounds})..."
                     )
                     solved = await solve_datadome_slider(current_worker.page)
@@ -899,10 +983,14 @@ class EtixCheckEngine:
                     else:
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] DataDome block/captcha active on '{current_worker.profile.name}'. "
-                            f"Executing fast 1 reload attempt with cookie reset..."
+                            f"Executing deep storage wipe and 1 fast reload attempt..."
                         )
                         try:
-                            await current_worker.context.clear_cookies()
+                            await deep_storage_wipe(current_worker.page)
+                            try:
+                                await current_worker.context.clear_cookies()
+                            except Exception:
+                                pass
                             await human_sleep((100, 200))
                             await current_worker.page.goto(
                                 show.url,
@@ -962,6 +1050,11 @@ class EtixCheckEngine:
                             f"[Worker #{current_worker.worker_index}] Profile '{current_worker.profile.name}' (ID: {current_worker.profile.user_id}) "
                             f"STILL BLOCKED after 1 reload."
                         )
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="still_blocked",
+                            reason="DataDome Still Blocked after reload"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="still_blocked")
                         # Record blocked profile & bad proxy
                         self.profile_manager.record_blocked_profile(
                             current_worker.profile,
@@ -1090,12 +1183,20 @@ class EtixCheckEngine:
 
                 # FAST-PATH: If page is hard-blocked by DataDome, hot-swap immediately without waiting 20s
                 if not is_slider_now and await self.detector.is_blocked_page(current_worker.page):
+                    inc_info = await self.detector.get_block_incident_info(current_worker.page)
+                    inc_msg = f" (Incident ID: {inc_info.get('incident_id')}, Timestamp: {inc_info.get('timestamp')})" if inc_info.get("incident_id") else ""
                     LOGGER.warning(
-                        f"[Worker #{current_worker.worker_index}] Hard DataDome block ('Access Temporarily Blocked') "
-                        f"detected while awaiting controls for '{current_worker.profile.name}'. Hot-swapping immediately..."
+                        f"[Worker #{current_worker.worker_index}] Hard DataDome block ('Access Temporarily Blocked'){inc_msg} "
+                        f"detected while awaiting controls for '{current_worker.profile.name}'. Executing deep storage wipe and hot-swapping..."
                     )
+                    await self.reporter.save_dom_dump(
+                        current_worker.page, show.name, prefix="blocked",
+                        reason=f"DataDome Hard Block{inc_msg}"
+                    )
+                    await self.reporter.save_screenshot(current_worker.page, show.name, prefix="blocked")
+                    await deep_storage_wipe(current_worker.page)
                     self.profile_manager.record_blocked_profile(
-                        current_worker.profile, "DataDome: Access Temporarily Blocked"
+                        current_worker.profile, f"DataDome: Access Temporarily Blocked{inc_msg}"
                     )
                     if current_worker.profile.proxy_key:
                         self.profile_manager.record_bad_proxy(

@@ -10,6 +10,7 @@ from playwright.async_api import Page, Locator
 from src.browser.human_actions import (
     accept_cookies_if_present,
     close_blocking_popups,
+    deep_storage_wipe,
     handle_captcha_required_back,
     handle_empty_shopping_cart_conflict,
     human_sleep,
@@ -510,7 +511,11 @@ class EtixCartHandler:
         slider_solved = False
         while add_slider_round < 2 and await self.detector.is_slider_captcha(page):
             add_slider_round += 1
-            LOGGER.info(f"DataDome slider challenge appeared upon clicking 'Add Tickets' (round {add_slider_round}/2). Solving...")
+            v_verdict, v_rt = await self.detector.get_datadome_verdict(page)
+            if v_verdict == "bv":
+                LOGGER.warning("DataDome challenge has HARD-BLOCKED verdict (t='bv') on Add Tickets. Aborting solve for instant Hot-Swap.")
+                return False, 0, "Заблокировано капчей (DataDome: IP hard-blocked verdict=bv)"
+            LOGGER.info(f"DataDome slider challenge appeared upon clicking 'Add Tickets' (round {add_slider_round}/2, verdict={v_verdict}). Solving...")
             slider_solved = await solve_datadome_slider(page)
             if not slider_solved:
                 break
@@ -889,8 +894,8 @@ class EtixCartHandler:
                                 "Applying Line 2 Fallback: Clearing session cookies to detach from stuck cart."
                             )
                             try:
-                                await page.context.clear_cookies()
-                                LOGGER.info("Cleared session cookies after failed slider on cart.")
+                                await deep_storage_wipe(page)
+                                LOGGER.info("Executed deep storage wipe after failed slider on cart.")
                             except Exception:
                                 pass
                             return
@@ -917,7 +922,7 @@ class EtixCartHandler:
                                     if not m_solved:
                                         LOGGER.warning("Modal slider unsolved. Clearing session cookies...")
                                         try:
-                                            await page.context.clear_cookies()
+                                            await deep_storage_wipe(page)
                                         except Exception:
                                             pass
                                         return
@@ -963,10 +968,10 @@ class EtixCartHandler:
             except Exception:
                 continue
 
-        # 3. Always clear session cookies after cart release to ensure clean slate for subsequent shows
+        # 3. Always clear session storage & cookies after cart release to ensure clean slate for subsequent shows
         try:
-            await page.context.clear_cookies()
-            LOGGER.debug("Cleared session cookies after cart release.")
+            await deep_storage_wipe(page)
+            LOGGER.debug("Cleared session storage and cookies after cart release.")
         except Exception:
             pass
 
