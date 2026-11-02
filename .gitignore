@@ -45,6 +45,8 @@ AGENTS.md
 ERRORS.md
 PROJECT_CONTEXT.md
 PROJECT_KNOWLEDGE.md
+TASKS.md
+tasks.md
 
 # Developer release utilities & CLI (local dev only)
 pack_release.bat
