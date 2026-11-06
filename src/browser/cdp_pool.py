@@ -24,6 +24,7 @@ except ImportError:
 
 from src.adspower.client import AdsPowerClient
 from src.adspower.profile_manager import AdsPowerProfileManager
+from src.browser.human_actions import deep_storage_wipe
 from src.config.settings import AppConfig
 from src.domain.models import AdsPowerProfile
 from src.etix.detector import EtixDetector
@@ -49,14 +50,18 @@ class CDPBrowserPool:
         client: AdsPowerClient,
         profile_manager: AdsPowerProfileManager,
         detector: Optional[EtixDetector] = None,
+        proxy_manager: Optional[Any] = None,
     ) -> None:
         self.config = config
         self.client = client
         self.profile_manager = profile_manager
         self.detector = detector or EtixDetector(config)
+        self.proxy_manager = proxy_manager
         self.playwright: Optional[Playwright] = None
         self.workers: List[BrowserWorker] = []
         self._lock = asyncio.Lock()
+        self.consecutive_bv_count: int = 0
+        self.MAX_CONSECUTIVE_BV: int = 8
 
     async def validate_worker_connection(
         self,
@@ -252,6 +257,12 @@ class CDPBrowserPool:
             w.worker_index = idx
 
         self.workers = verified_workers
+        # Register active proxies in proxy_manager for strict Collision Prevention
+        if self.proxy_manager and hasattr(self.proxy_manager, "in_use_proxies"):
+            for w in self.workers:
+                if w.profile.proxy_key:
+                    self.proxy_manager.in_use_proxies.add(w.profile.proxy_key)
+
         LOGGER.info(
             f"CDP Browser Pool initialization complete: {len(self.workers)}/{target_count} "
             f"confirmed healthy workers ready for checking."
@@ -356,115 +367,265 @@ class CDPBrowserPool:
             LOGGER.error(f"Error connecting profile {profile.user_id}: {exc}")
             return None
 
+    def record_hard_verdict_bv(self) -> bool:
+        """Record a hard verdict='bv' event. Returns True if circuit breaker threshold (8) is reached."""
+        self.consecutive_bv_count += 1
+        LOGGER.warning(
+            f"Circuit Breaker count: {self.consecutive_bv_count}/{self.MAX_CONSECUTIVE_BV} consecutive DataDome 'bv' verdicts."
+        )
+        return self.consecutive_bv_count >= self.MAX_CONSECUTIVE_BV
+
+    def reset_circuit_breaker(self) -> None:
+        """Reset circuit breaker counter upon successful navigation or ready worker."""
+        if self.consecutive_bv_count > 0:
+            LOGGER.debug(f"Resetting circuit breaker (was {self.consecutive_bv_count}).")
+            self.consecutive_bv_count = 0
+
+    def is_circuit_breaker_tripped(self) -> bool:
+        """Check if circuit breaker has tripped."""
+        return self.consecutive_bv_count >= self.MAX_CONSECUTIVE_BV
+
+    async def in_place_proxy_swap(
+        self,
+        worker: BrowserWorker,
+        reason: str = "In-Place Proxy Swap",
+    ) -> Optional[BrowserWorker]:
+        """
+        Executes In-Place Hot-Swap v2 on an existing AdsPower profile:
+          1. Deep Storage Wipe (wiping localStorage, cookies, caches).
+          2. Closes browser window & stops AdsPower instance cleanly.
+          3. Releases previous proxy from in_use_proxies and marks it bad.
+          4. Allocates next clean proxy from ProxyManager (good -> slow) without collisions.
+          5. Updates profile in AdsPower via POST /api/v1/user/update.
+          6. Launches browser and reconnects Playwright CDP.
+          7. Validates connection (Pre-flight 3s health check).
+          8. Two-Level Cascade: If external proxy pool is exhausted, smoothly falls back
+             to replace_worker_with_reserve from target AdsPower group (up to 3 replacements).
+        """
+        async with self._lock:
+            LOGGER.warning(
+                f"[Worker #{worker.worker_index}] Initiating In-Place Hot-Swap v2 for profile '{worker.profile.name}' (ID: {worker.profile.user_id}). Reason: {reason}"
+            )
+            old_proxy = worker.profile.proxy_key
+
+            # 1. Deep Storage Wipe before closing browser
+            try:
+                if worker.page and not worker.page.is_closed():
+                    await deep_storage_wipe(worker.page)
+            except Exception as wipe_err:
+                LOGGER.debug(f"[Worker #{worker.worker_index}] Deep storage wipe notice: {wipe_err}")
+
+            # 2. Close browser session and stop in AdsPower
+            try:
+                await asyncio.wait_for(worker.browser.close(), timeout=2.5)
+            except Exception:
+                pass
+            try:
+                await self.client.stop_browser(worker.profile.user_id)
+            except Exception:
+                pass
+            worker.profile.is_open = False
+
+            # 3. Mark old proxy as bad in ProxyManager and release it
+            if old_proxy:
+                if self.proxy_manager and hasattr(self.proxy_manager, "mark_proxy_bad"):
+                    self.proxy_manager.mark_proxy_bad(old_proxy, reason=reason)
+                if self.profile_manager:
+                    self.profile_manager.record_bad_proxy(old_proxy, reason)
+
+            # 4. Try allocating next clean proxy from ProxyManager
+            allocated_proxy = None
+            if self.proxy_manager and hasattr(self.proxy_manager, "get_next_available_proxy"):
+                next_proxy = self.proxy_manager.get_next_available_proxy()
+                if next_proxy:
+                    allocated_proxy, pool_type = next_proxy
+                    LOGGER.info(
+                        f"[Worker #{worker.worker_index}] Allocated clean {pool_type.upper()} proxy for In-Place Hot-Swap: {allocated_proxy}"
+                    )
+
+            # 5. If clean external proxy available -> perform In-Place update on existing profile
+            if allocated_proxy:
+                parsed_cfg = AdsPowerClient.parse_proxy_string(allocated_proxy)
+                if parsed_cfg:
+                    update_ok = await self.client.update_profile_proxy(
+                        user_id=worker.profile.user_id,
+                        proxy_config=parsed_cfg,
+                    )
+                    if update_ok:
+                        # Update in-memory profile proxy details
+                        worker.profile.proxy_host = parsed_cfg["proxy_host"]
+                        worker.profile.proxy_port = parsed_cfg["proxy_port"]
+                        worker.profile.proxy_user = parsed_cfg.get("proxy_user", "")
+                        worker.profile.proxy_password = parsed_cfg.get("proxy_password", "")
+                        worker.profile.proxy_type = parsed_cfg.get("proxy_type", "http")
+
+                        # Reconnect profile with new proxy
+                        new_worker = await self._connect_profile(worker.profile, worker_index=worker.worker_index)
+                        if new_worker:
+                            # Pre-flight health check
+                            is_healthy, status_msg = await self.validate_worker_connection(new_worker, timeout_s=3.0)
+                            if is_healthy:
+                                if worker in self.workers:
+                                    idx = self.workers.index(worker)
+                                    self.workers[idx] = new_worker
+                                else:
+                                    self.workers.append(new_worker)
+                                LOGGER.info(
+                                    f"[Worker #{worker.worker_index}] In-Place Hot-Swap v2 SUCCESS! Reconnected profile '{worker.profile.name}' with proxy {allocated_proxy} ({status_msg})."
+                                )
+                                return new_worker
+                            else:
+                                LOGGER.warning(
+                                    f"[Worker #{worker.worker_index}] In-Place proxy {allocated_proxy} failed health check: {status_msg}. Closing browser..."
+                                )
+                                try:
+                                    await asyncio.wait_for(new_worker.browser.close(), timeout=2.5)
+                                except Exception:
+                                    pass
+                                try:
+                                    await self.client.stop_browser(worker.profile.user_id)
+                                except Exception:
+                                    pass
+                                if self.proxy_manager and hasattr(self.proxy_manager, "mark_proxy_bad"):
+                                    self.proxy_manager.mark_proxy_bad(allocated_proxy, reason=f"In-Place Health Check Failed: {status_msg}")
+                    else:
+                        LOGGER.warning(
+                            f"[Worker #{worker.worker_index}] AdsPower API update_profile_proxy failed for {worker.profile.user_id}."
+                        )
+                        if self.proxy_manager and hasattr(self.proxy_manager, "release_proxy"):
+                            self.proxy_manager.release_proxy(allocated_proxy)
+
+            # 6. Two-Level Cascade Fallback:
+            # If external proxy pool is exhausted or in-place update failed, fall back to reserve profiles from group
+            LOGGER.warning(
+                f"[Worker #{worker.worker_index}] External proxy pool exhausted or In-Place swap unavailable. "
+                f"Falling back to Cascade Level 2: Reserve profiles from AdsPower group..."
+            )
+            return await self._replace_worker_with_reserve_unlocked(worker, reason=reason)
+
     async def replace_worker_with_reserve(
         self,
         failing_worker: BrowserWorker,
         reason: str = "DataDome block",
         max_attempts: Optional[int] = None,
     ) -> Optional[BrowserWorker]:
-        """
-        Close a failing worker, mark its proxy bad for this session,
-        allocate a reserve profile with native AdsPower settings, and start a new worker.
-        If a reserve candidate fails to launch (e.g. missing SunBrowser kernel) or fails
-        the pre-flight health check, continues trying subsequent available reserve profiles
-        until a healthy worker is connected or reserves are exhausted.
-        """
+        """Public thread-safe interface for replacing worker with reserve profile from group."""
         async with self._lock:
-            LOGGER.warning(
-                f"Initiating Hot-Swap for Worker #{failing_worker.worker_index} ({failing_worker.profile.user_id}). Reason: {reason}"
-            )
-            # 1. Record failing proxy as session bad, record blocked profile, and mark profile failed
-            if failing_worker.profile.proxy_key:
-                self.profile_manager.record_bad_proxy(failing_worker.profile.proxy_key, reason)
-            self.profile_manager.record_blocked_profile(failing_worker.profile, reason)
-            self.profile_manager.mark_profile_failed(failing_worker.profile)
+            return await self._replace_worker_with_reserve_unlocked(failing_worker, reason, max_attempts)
 
-            # 2. Close failing browser
-            try:
-                await asyncio.wait_for(failing_worker.browser.close(), timeout=2.5)
-            except Exception:
-                pass
-            try:
-                await self.client.stop_browser(failing_worker.profile.user_id)
-            except Exception:
-                pass
-            failing_worker.profile.is_open = False
+    async def _replace_worker_with_reserve_unlocked(
+        self,
+        failing_worker: BrowserWorker,
+        reason: str = "DataDome block",
+        max_attempts: Optional[int] = None,
+    ) -> Optional[BrowserWorker]:
+        """
+        Internal implementation of reserve profile hot-swap assuming self._lock is already held.
+        """
+        LOGGER.warning(
+            f"Initiating Reserve Hot-Swap for Worker #{failing_worker.worker_index} ({failing_worker.profile.user_id}). Reason: {reason}"
+        )
+        # 1. Record failing proxy as session bad, record blocked profile, and mark profile failed
+        if failing_worker.profile.proxy_key:
+            self.profile_manager.record_bad_proxy(failing_worker.profile.proxy_key, reason)
+            if self.proxy_manager and hasattr(self.proxy_manager, "mark_proxy_bad"):
+                self.proxy_manager.mark_proxy_bad(failing_worker.profile.proxy_key, reason=reason)
+        self.profile_manager.record_blocked_profile(failing_worker.profile, reason)
+        self.profile_manager.mark_profile_failed(failing_worker.profile)
 
-            # 3. Iterate through available reserve profiles until one connects and passes health check
-            profiles_list = getattr(self.profile_manager, "profiles", []) if self.profile_manager else []
-            attempt_limit = max_attempts if max_attempts is not None else max(10, len(profiles_list))
-            attempt = 0
+        # 2. Close failing browser
+        try:
+            await asyncio.wait_for(failing_worker.browser.close(), timeout=2.5)
+        except Exception:
+            pass
+        try:
+            await self.client.stop_browser(failing_worker.profile.user_id)
+        except Exception:
+            pass
+        failing_worker.profile.is_open = False
 
-            while attempt < attempt_limit:
-                attempt += 1
-                reserve_prof = self.profile_manager.get_next_available_reserve()
-                if not reserve_prof:
-                    LOGGER.error(
-                        f"[Worker #{failing_worker.worker_index}] No reserve profiles available in target group for hot-swap (attempt {attempt}/{attempt_limit})!"
-                    )
-                    break
+        # Release old proxy if tracked
+        if failing_worker.profile.proxy_key and self.proxy_manager and hasattr(self.proxy_manager, "release_proxy"):
+            self.proxy_manager.release_proxy(failing_worker.profile.proxy_key)
 
-                LOGGER.info(
-                    f"[Worker #{failing_worker.worker_index}] Trying reserve profile '{reserve_prof.name}' "
-                    f"({reserve_prof.user_id}, attempt {attempt}/{attempt_limit}) with native settings..."
+        # 3. Iterate through available reserve profiles until one connects and passes health check
+        profiles_list = getattr(self.profile_manager, "profiles", []) if self.profile_manager else []
+        attempt_limit = max_attempts if max_attempts is not None else max(10, len(profiles_list))
+        attempt = 0
+
+        while attempt < attempt_limit:
+            attempt += 1
+            reserve_prof = self.profile_manager.get_next_available_reserve()
+            if not reserve_prof:
+                LOGGER.error(
+                    f"[Worker #{failing_worker.worker_index}] No reserve profiles available in target group for hot-swap (attempt {attempt}/{attempt_limit})!"
                 )
+                break
 
-                # Connect new reserve profile directly with native AdsPower settings (Strict Immutability)
-                new_worker = await self._connect_profile(reserve_prof, worker_index=failing_worker.worker_index)
-                if not new_worker:
-                    LOGGER.warning(
-                        f"[Worker #{failing_worker.worker_index}] Failed to launch/connect reserve profile "
-                        f"'{reserve_prof.name}' ({reserve_prof.user_id}). Marking failed and trying next reserve candidate..."
-                    )
-                    reserve_prof.is_open = False
-                    self.profile_manager.mark_profile_failed(reserve_prof)
-                    try:
-                        await self.client.stop_browser(reserve_prof.user_id)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.5)
-                    continue
-
-                # Pre-flight health check on new reserve worker
-                is_healthy, status_msg = await self.validate_worker_connection(new_worker, timeout_s=3.0)
-                if not is_healthy:
-                    LOGGER.warning(
-                        f"[Worker #{failing_worker.worker_index}] Reserve profile '{reserve_prof.name}' "
-                        f"failed health check ({status_msg}). Closing and trying next reserve candidate..."
-                    )
-                    try:
-                        await asyncio.wait_for(new_worker.browser.close(), timeout=2.5)
-                    except Exception:
-                        pass
-                    try:
-                        await self.client.stop_browser(reserve_prof.user_id)
-                    except Exception:
-                        pass
-                    reserve_prof.is_open = False
-                    self.profile_manager.mark_profile_failed(reserve_prof)
-                    await asyncio.sleep(0.5)
-                    continue
-
-                # Successful connection and verified healthy
-                if failing_worker in self.workers:
-                    idx = self.workers.index(failing_worker)
-                    self.workers[idx] = new_worker
-                else:
-                    self.workers.append(new_worker)
-
-                LOGGER.info(
-                    f"[Worker #{failing_worker.worker_index}] Hot-swap complete! Replaced with profile "
-                    f"'{reserve_prof.name}' ({reserve_prof.user_id})"
-                )
-                return new_worker
-
-            # If all reserve candidates failed or pool exhausted
-            LOGGER.error(
-                f"[Worker #{failing_worker.worker_index}] Hot-swap failed: all reserve candidates failed or pool exhausted."
+            LOGGER.info(
+                f"[Worker #{failing_worker.worker_index}] Trying reserve profile '{reserve_prof.name}' "
+                f"({reserve_prof.user_id}, attempt {attempt}/{attempt_limit}) with native settings..."
             )
+
+            # Connect new reserve profile directly with native AdsPower settings (Strict Immutability)
+            new_worker = await self._connect_profile(reserve_prof, worker_index=failing_worker.worker_index)
+            if not new_worker:
+                LOGGER.warning(
+                    f"[Worker #{failing_worker.worker_index}] Failed to launch/connect reserve profile "
+                    f"'{reserve_prof.name}' ({reserve_prof.user_id}). Marking failed and trying next reserve candidate..."
+                )
+                reserve_prof.is_open = False
+                self.profile_manager.mark_profile_failed(reserve_prof)
+                try:
+                    await self.client.stop_browser(reserve_prof.user_id)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+                continue
+
+            # Pre-flight health check on new reserve worker
+            is_healthy, status_msg = await self.validate_worker_connection(new_worker, timeout_s=3.0)
+            if not is_healthy:
+                LOGGER.warning(
+                    f"[Worker #{failing_worker.worker_index}] Reserve profile '{reserve_prof.name}' "
+                    f"failed health check ({status_msg}). Closing and trying next reserve candidate..."
+                )
+                try:
+                    await asyncio.wait_for(new_worker.browser.close(), timeout=2.5)
+                except Exception:
+                    pass
+                try:
+                    await self.client.stop_browser(reserve_prof.user_id)
+                except Exception:
+                    pass
+                reserve_prof.is_open = False
+                self.profile_manager.mark_profile_failed(reserve_prof)
+                await asyncio.sleep(0.5)
+                continue
+
+            # Successful connection and verified healthy
+            if reserve_prof.proxy_key and self.proxy_manager and hasattr(self.proxy_manager, "in_use_proxies"):
+                self.proxy_manager.in_use_proxies.add(reserve_prof.proxy_key)
+
             if failing_worker in self.workers:
-                self.workers.remove(failing_worker)
-            return None
+                idx = self.workers.index(failing_worker)
+                self.workers[idx] = new_worker
+            else:
+                self.workers.append(new_worker)
+
+            LOGGER.info(
+                f"[Worker #{failing_worker.worker_index}] Hot-swap complete! Replaced with profile "
+                f"'{reserve_prof.name}' ({reserve_prof.user_id})"
+            )
+            return new_worker
+
+        # If all reserve candidates failed or pool exhausted
+        LOGGER.error(
+            f"[Worker #{failing_worker.worker_index}] Hot-swap failed: all reserve candidates failed or pool exhausted."
+        )
+        if failing_worker in self.workers:
+            self.workers.remove(failing_worker)
+        return None
 
     async def stop_and_remove_worker(self, worker: BrowserWorker, reason: str = "") -> None:
         """
@@ -485,6 +646,8 @@ class CDPBrowserPool:
                 pass
             worker.profile.is_open = False
             self.profile_manager.mark_profile_failed(worker.profile)
+            if self.proxy_manager and worker.profile.proxy_key and hasattr(self.proxy_manager, "release_proxy"):
+                self.proxy_manager.release_proxy(worker.profile.proxy_key)
             if worker in self.workers:
                 self.workers.remove(worker)
 
@@ -508,6 +671,8 @@ class CDPBrowserPool:
 
         self.workers.clear()
         self.profile_manager.reset_session_statuses()
+        if self.proxy_manager and hasattr(self.proxy_manager, "in_use_proxies"):
+            self.proxy_manager.in_use_proxies.clear()
 
         if self.playwright:
             try:

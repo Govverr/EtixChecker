@@ -172,13 +172,19 @@ class AdsPowerClient:
         proxy_config: Dict[str, Any],
     ) -> bool:
         """
-        SAFETY INVARIANT (STRICT IMMUTABILITY):
-        Modifying AdsPower profile configurations or proxies via API is strictly prohibited.
-        This safety guard prevents accidental mutation of user's profiles in AdsPower.
+        Update the proxy configuration of an existing AdsPower profile via Local REST API.
+        Enables In-Place Hot-Swap v2 without creating new profiles or exceeding subscription limits.
+        Sends POST /api/v1/user/update.
         """
-        LOGGER.warning(
-            f"Blocked attempt to modify profile {user_id} in AdsPower (Safety Invariant: Profiles are Immutable)."
-        )
+        body = {
+            "user_id": user_id,
+            "user_proxy_config": proxy_config,
+        }
+        res = await self._request("POST", "/api/v1/user/update", json_data=body)
+        if res.get("code") == 0:
+            LOGGER.info(f"Successfully updated proxy for profile {user_id} in AdsPower")
+            return True
+        LOGGER.warning(f"Failed to update proxy for profile {user_id}: {res.get('msg')}")
         return False
 
     @staticmethod
