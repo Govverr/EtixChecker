@@ -7,6 +7,7 @@ import dataclasses
 import math
 import os
 import queue
+import re
 import sys
 import threading
 from pathlib import Path
@@ -42,13 +43,15 @@ def _handle_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
         pass
 
 
-sys.excepthook = _handle_uncaught_exception
+if __name__ == "__main__":
+    sys.excepthook = _handle_uncaught_exception
 
 import customtkinter as ctk
 import pandas as pd
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 from src.adspower.backup_service import ProfileBackupService
+from src.storage.proxy_manager import ProxyManager, ProxyCheckResult
 from src.adspower.client import AdsPowerClient
 from src.adspower.profile_manager import AdsPowerProfileManager
 from src.config.settings import (
@@ -288,6 +291,299 @@ class ShowCardWidget(ctk.CTkFrame):
             self.lbl_sub.configure(text=f"{res.details}")
 
 
+def parse_blocked_profiles(file_path: Path) -> List[Dict[str, str]]:
+    """Parse data/blocked_profiles.txt entries into structured dicts."""
+    if not file_path.exists():
+        return []
+    records = []
+    # Format: [2026-11-06 14:22:27] Profile: Profile #01 (ID: u1) | Proxy: 1.1.1.1:8000 | Reason: DataDome Blocked
+    pattern = re.compile(
+        r"^\[(?P<timestamp>[^\]]+)\]\s+Profile:\s*(?P<name>.*?)\s+\(ID:\s*(?P<user_id>[^\)]+)\)\s+\|\s+Proxy:\s*(?P<proxy>[^\|]+)\s+\|\s+Reason:\s*(?P<reason>.*)$"
+    )
+    try:
+        for line in file_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = pattern.match(line)
+            if m:
+                records.append(m.groupdict())
+            else:
+                id_m = re.search(r"\(ID:\s*([^\)]+)\)", line)
+                uid = id_m.group(1) if id_m else ""
+                records.append({
+                    "timestamp": "",
+                    "name": "",
+                    "user_id": uid,
+                    "proxy": "",
+                    "reason": line,
+                })
+    except Exception as exc:
+        LOGGER.warning(f"Error reading blocked profiles file {file_path}: {exc}")
+    return records
+
+
+class BlockedProfilesModal(ctk.CTkToplevel):
+    """Modern modal dialog displaying blocked AdsPower profiles with 1-click ID copy."""
+
+    def __init__(
+        self,
+        parent: ctk.CTk,
+        file_path: Path = Path("data/blocked_profiles.txt"),
+        on_clear_callback: Optional[Callable[[], None]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.file_path = file_path
+        self.on_clear_callback = on_clear_callback
+        self.title("Заблокированные профили AdsPower")
+        self.geometry("860x680")
+        self.minsize(740, 520)
+        self.configure(fg_color=COLOR_BG)
+
+        self.transient(parent)
+        self.after(50, self._center_on_parent)
+
+        self.unique_ids: List[str] = []
+        self._build_ui()
+        self._load_data()
+
+    def _center_on_parent(self) -> None:
+        try:
+            self.update_idletasks()
+            pw = self.master.winfo_width()
+            ph = self.master.winfo_height()
+            px = self.master.winfo_x()
+            py = self.master.winfo_y()
+            w = self.winfo_width()
+            h = self.winfo_height()
+            x = px + max(0, (pw - w) // 2)
+            y = py + max(0, (ph - h) // 2)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+            self.lift()
+            self.focus_set()
+        except Exception:
+            pass
+
+    def _build_ui(self) -> None:
+        # Header Card
+        self.header_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            border_color=COLOR_CARD_BORDER,
+            border_width=1,
+            corner_radius=12,
+        )
+        self.header_card.pack(fill="x", padx=16, pady=(16, 10))
+
+        header_inner = ctk.CTkFrame(self.header_card, fg_color="transparent")
+        header_inner.pack(fill="x", padx=16, pady=12)
+
+        lbl_title = ctk.CTkLabel(
+            header_inner,
+            text="🚫  Заблокированные профили AdsPower",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            text_color="#f87171",
+        )
+        lbl_title.pack(anchor="w")
+
+        lbl_subtitle = ctk.CTkLabel(
+            header_inner,
+            text="Профили, заблокированные защитой DataDome. Скопируйте ID в 1 клик для поиска и обновления в AdsPower.",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            text_color=COLOR_TEXT_MUTED,
+        )
+        lbl_subtitle.pack(anchor="w", pady=(2, 0))
+
+        # IDs Card (Copy in 1 Click)
+        self.ids_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            border_color=COLOR_CARD_BORDER,
+            border_width=1,
+            corner_radius=12,
+        )
+        self.ids_card.pack(fill="x", padx=16, pady=(0, 10))
+
+        ids_header = ctk.CTkFrame(self.ids_card, fg_color="transparent")
+        ids_header.pack(fill="x", padx=16, pady=(12, 6))
+
+        lbl_ids_title = ctk.CTkLabel(
+            ids_header,
+            text="📋  User ID профилей (по одному на строку — готово для вставки в фильтр AdsPower):",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        lbl_ids_title.pack(side="left")
+
+        self.btn_copy = ctk.CTkButton(
+            ids_header,
+            text="📋 Скопировать все ID",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color=COLOR_BTN_PRIMARY,
+            hover_color=COLOR_BTN_PRIMARY_HOVER,
+            height=30,
+            corner_radius=6,
+            command=self._on_copy_clicked,
+        )
+        self.btn_copy.pack(side="right")
+
+        self.txt_ids = ctk.CTkTextbox(
+            self.ids_card,
+            height=100,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color="#0b0f19",
+            text_color="#f8fafc",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=8,
+            wrap="none",
+        )
+        self.txt_ids.pack(fill="x", padx=16, pady=(0, 12))
+
+        # Details Table Card
+        self.details_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            border_color=COLOR_CARD_BORDER,
+            border_width=1,
+            corner_radius=12,
+        )
+        self.details_card.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        # Header for columns
+        table_hdr = ctk.CTkFrame(self.details_card, fg_color="#182038", corner_radius=6)
+        table_hdr.pack(fill="x", padx=12, pady=(10, 4))
+
+        ctk.CTkLabel(table_hdr, text="User ID", width=110, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"), text_color="#cbd5e1").pack(side="left", padx=8, pady=6)
+        ctk.CTkLabel(table_hdr, text="Имя профиля", width=180, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"), text_color="#cbd5e1").pack(side="left", padx=8, pady=6)
+        ctk.CTkLabel(table_hdr, text="Прокси", width=170, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"), text_color="#cbd5e1").pack(side="left", padx=8, pady=6)
+        ctk.CTkLabel(table_hdr, text="Причина блокировки", width=180, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"), text_color="#cbd5e1").pack(side="left", padx=8, pady=6)
+        ctk.CTkLabel(table_hdr, text="Время", width=130, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"), text_color="#cbd5e1").pack(side="left", padx=8, pady=6)
+
+        self.scroll_details = ctk.CTkScrollableFrame(
+            self.details_card,
+            fg_color="transparent",
+        )
+        self.scroll_details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        # Bottom Action Bar
+        bottom_bar = ctk.CTkFrame(self, fg_color="transparent")
+        bottom_bar.pack(fill="x", padx=16, pady=(0, 16))
+
+        self.btn_open_file = ctk.CTkButton(
+            bottom_bar,
+            text="📂  Открыть файл",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            fg_color="#1e293b",
+            hover_color="#334155",
+            height=32,
+            corner_radius=6,
+            command=self._on_open_file_clicked,
+        )
+        self.btn_open_file.pack(side="left", padx=(0, 8))
+
+        self.btn_clear_list = ctk.CTkButton(
+            bottom_bar,
+            text="🗑️  Очистить журнал",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            fg_color="#3f1319",
+            hover_color="#5f1d27",
+            text_color="#f87171",
+            height=32,
+            corner_radius=6,
+            command=self._on_clear_clicked,
+        )
+        self.btn_clear_list.pack(side="left")
+
+        self.btn_close = ctk.CTkButton(
+            bottom_bar,
+            text="Закрыть",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color="#1e293b",
+            hover_color="#334155",
+            height=32,
+            corner_radius=6,
+            command=self.destroy,
+        )
+        self.btn_close.pack(side="right")
+
+    def _load_data(self) -> None:
+        records = parse_blocked_profiles(self.file_path)
+        unique_ids = []
+        seen = set()
+        for r in records:
+            uid = r.get("user_id", "").strip()
+            if uid and uid not in seen:
+                seen.add(uid)
+                unique_ids.append(uid)
+
+        self.unique_ids = unique_ids
+
+        self.txt_ids.configure(state="normal")
+        self.txt_ids.delete("1.0", "end")
+        if unique_ids:
+            self.txt_ids.insert("1.0", "\n".join(unique_ids))
+            self.btn_copy.configure(state="normal", text=f"📋 Скопировать все ID ({len(unique_ids)})")
+        else:
+            self.txt_ids.insert("1.0", "— Список пуст. Заблокированных профилей нет —")
+            self.btn_copy.configure(state="disabled", text="📋 Скопировать все ID (0)")
+        self.txt_ids.configure(state="disabled")
+
+        for widget in self.scroll_details.winfo_children():
+            widget.destroy()
+
+        if not records:
+            lbl_empty = ctk.CTkLabel(
+                self.scroll_details,
+                text="✅ Заблокированных профилей не обнаружено. Все профили чисты!",
+                font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+                text_color="#10b981",
+            )
+            lbl_empty.pack(pady=28)
+            return
+
+        for idx, r in enumerate(reversed(records)):
+            row_bg = "#182038" if idx % 2 == 0 else "#121829"
+            row_frame = ctk.CTkFrame(self.scroll_details, fg_color=row_bg, corner_radius=6)
+            row_frame.pack(fill="x", pady=2, padx=4)
+
+            ctk.CTkLabel(row_frame, text=r.get("user_id", ""), width=110, anchor="w", font=ctk.CTkFont(family="Consolas", size=11, weight="bold"), text_color="#f87171").pack(side="left", padx=8, pady=5)
+            ctk.CTkLabel(row_frame, text=r.get("name", ""), width=180, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11), text_color="#f8fafc").pack(side="left", padx=8, pady=5)
+            ctk.CTkLabel(row_frame, text=r.get("proxy", ""), width=170, anchor="w", font=ctk.CTkFont(family="Consolas", size=11), text_color="#94a3b8").pack(side="left", padx=8, pady=5)
+            ctk.CTkLabel(row_frame, text=r.get("reason", ""), width=180, anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=10), text_color="#fbbf24").pack(side="left", padx=8, pady=5)
+            ctk.CTkLabel(row_frame, text=r.get("timestamp", ""), width=130, anchor="w", font=ctk.CTkFont(family="Consolas", size=10), text_color="#64748b").pack(side="left", padx=8, pady=5)
+
+    def _on_copy_clicked(self) -> None:
+        if not self.unique_ids:
+            return
+        text = "\n".join(self.unique_ids)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.btn_copy.configure(text=f"✓ Скопировано в буфер! ({len(self.unique_ids)} ID)", fg_color="#059669")
+        self.after(2500, lambda: self.btn_copy.configure(text=f"📋 Скопировать все ID ({len(self.unique_ids)})", fg_color=COLOR_BTN_PRIMARY))
+
+    def _on_open_file_clicked(self) -> None:
+        if not self.file_path.exists():
+            messagebox.showwarning("Файл не найден", f"Файл {self.file_path} еще не создан.")
+            return
+        os.startfile(self.file_path)
+
+    def _on_clear_clicked(self) -> None:
+        if not self.file_path.exists():
+            return
+        if not messagebox.askyesno("Очистить список?", "Вы уверены, что хотите очистить журнал заблокированных профилей?"):
+            return
+        try:
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                f.write("")
+            self._load_data()
+            if self.on_clear_callback:
+                self.on_clear_callback()
+            messagebox.showinfo("Очищено", "Журнал заблокированных профилей успешно очищен.")
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось очистить файл: {exc}")
+
+
 class EtixGuiApp(ctk.CTk):
     """Modern Dark Card Dashboard for Etix Checker."""
 
@@ -311,12 +607,18 @@ class EtixGuiApp(ctk.CTk):
         self.profile_manager = AdsPowerProfileManager(client=self.client)
         self.backup_service = ProfileBackupService()
         self.update_service = UpdateService()
+        self.proxy_manager = ProxyManager(
+            good_proxies_file=CONFIG.good_proxies_file,
+            bad_proxies_file=CONFIG.bad_proxies_file,
+        )
         self.current_group_name: str = CONFIG.adspower_group_name
         self.show_cards: Dict[str, ShowCardWidget] = {}
 
         self._build_ui()
         self._load_shows_preview()
         self._check_adspower_status_async()
+        self._update_blocked_badge()
+        self._refresh_proxy_tab_data()
         self._poll_queue()
 
     def _build_ui(self) -> None:
@@ -440,6 +742,9 @@ class EtixGuiApp(ctk.CTk):
         self.stat_status = self._create_metric_chip(self.stats_bar, "🚀 Статус", "Готов к запуску")
         self.stat_status.pack(side="left", padx=8)
 
+        self.stat_proxies = self._create_metric_chip(self.stats_bar, "🌐 Пул прокси", "Good: 0 | Slow: 0")
+        self.stat_proxies.pack(side="left", padx=8)
+
         # 3. Action Toolbar (Styled Buttons)
         self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.btn_frame.pack(fill="x", padx=20, pady=(0, 12))
@@ -468,7 +773,7 @@ class EtixGuiApp(ctk.CTk):
         self.btn_report = self._create_action_btn("📊  report.csv", lambda: self._open_file(Path("report.csv")))
         self.btn_report.pack(side="left", padx=6)
 
-        self.btn_blocked = self._create_action_btn("🚫  Заблокированные", lambda: self._open_file(Path("data/blocked_profiles.txt")))
+        self.btn_blocked = self._create_action_btn("🚫  Заблокированные (0)", self._show_blocked_profiles_modal)
         self.btn_blocked.pack(side="left", padx=6)
 
         self.btn_logs = self._create_action_btn("📁  Логи", lambda: self._open_folder(CONFIG.logs_dir))
@@ -510,6 +815,7 @@ class EtixGuiApp(ctk.CTk):
         self.tab_dashboard = self.tabview.add("📊  Панель мониторинга")
         self.tab_logs = self.tabview.add("📜  Журнал событий (Лог)")
         self.tab_settings = self.tabview.add("⚙️  Настройки задержек")
+        self.tab_proxies = self.tabview.add("🌐  Менеджер прокси")
 
         # Quick Selection Bar
         self.selection_bar = ctk.CTkFrame(self.tab_dashboard, fg_color="transparent")
@@ -575,6 +881,9 @@ class EtixGuiApp(ctk.CTk):
 
         # Tab 3: Delays Configuration
         self._build_delays_tab()
+
+        # Tab 4: Proxy Management & Pre-Flight
+        self._build_proxies_tab()
 
     def _build_delays_tab(self) -> None:
         """Build user configuration interface for pipeline delays with hardware-enforced minimums."""
@@ -1269,6 +1578,10 @@ class EtixGuiApp(ctk.CTk):
                     config=active_cfg,
                     client=self.client,
                     profile_manager=self.profile_manager,
+                    proxy_manager=self.proxy_manager,
+                )
+                engine.proxy_manager.on_slow_pool_transition = lambda: self.event_queue.put(
+                    ("proxy_pool_slow_transition",)
                 )
 
                 def on_done(res: CheckResult, current: int, total: int):
@@ -1353,6 +1666,304 @@ class EtixGuiApp(ctk.CTk):
                 self.event_queue.put(("collect_logs_done", True, str(zip_path)))
             except Exception as exc:
                 self.event_queue.put(("collect_logs_done", False, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+    def _update_blocked_badge(self) -> None:
+        """Update count badge on the Blocked Profiles toolbar button."""
+        blocked_file = Path("data/blocked_profiles.txt")
+        records = parse_blocked_profiles(blocked_file)
+        unique_ids = set(r.get("user_id", "").strip() for r in records if r.get("user_id", "").strip())
+        count = len(unique_ids)
+        if count > 0:
+            self.btn_blocked.configure(
+                text=f"🚫  Заблокированные ({count})",
+                fg_color="#3b1219",
+                hover_color="#541b24",
+                text_color="#f87171",
+            )
+        else:
+            self.btn_blocked.configure(
+                text="🚫  Заблокированные (0)",
+                fg_color=COLOR_BTN_SEC,
+                hover_color=COLOR_BTN_SEC_HOVER,
+                text_color=COLOR_TEXT_MUTED,
+            )
+
+    def _show_blocked_profiles_modal(self) -> None:
+        """Display modern modal dialog with blocked profiles and 1-click copy."""
+        modal = BlockedProfilesModal(
+            parent=self,
+            file_path=Path("data/blocked_profiles.txt"),
+            on_clear_callback=self._update_blocked_badge,
+        )
+        modal.grab_set()
+
+    def _build_proxies_tab(self) -> None:
+        """Build the Proxy Management tab with Pre-flight checker and pool inspection."""
+        # 1. Top Metric Chips for Proxies
+        self.proxy_stats_bar = ctk.CTkFrame(self.tab_proxies, fg_color="transparent")
+        self.proxy_stats_bar.pack(fill="x", padx=6, pady=(6, 10))
+
+        self.stat_proxy_good = self._create_metric_chip(self.proxy_stats_bar, "✅ Быстрые (Good)", "0")
+        self.stat_proxy_good.pack(side="left", padx=(0, 6))
+
+        self.stat_proxy_slow = self._create_metric_chip(self.proxy_stats_bar, "⚠️ Резерв (Slow)", "0")
+        self.stat_proxy_slow.pack(side="left", padx=6)
+
+        self.stat_proxy_bad = self._create_metric_chip(self.proxy_stats_bar, "❌ Нерабочие (Bad)", "0")
+        self.stat_proxy_bad.pack(side="left", padx=6)
+
+        self.stat_proxy_in_use = self._create_metric_chip(self.proxy_stats_bar, "🔒 В работе (In-Use)", "0")
+        self.stat_proxy_in_use.pack(side="left", padx=6)
+
+        # 2. Action Toolbar for Proxies
+        self.proxy_actions_bar = ctk.CTkFrame(self.tab_proxies, fg_color="transparent")
+        self.proxy_actions_bar.pack(fill="x", padx=6, pady=(0, 10))
+
+        self.btn_load_proxy_file = ctk.CTkButton(
+            self.proxy_actions_bar,
+            text="📂  Загрузить файл прокси",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color=COLOR_BTN_PRIMARY,
+            hover_color=COLOR_BTN_PRIMARY_HOVER,
+            height=32,
+            corner_radius=6,
+            command=self._on_load_proxy_file_clicked,
+        )
+        self.btn_load_proxy_file.pack(side="left", padx=(0, 6))
+
+        self.btn_preflight = ctk.CTkButton(
+            self.proxy_actions_bar,
+            text="⚡  Проверить прокси (Pre-flight)",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color="#065f46",
+            hover_color="#047857",
+            height=32,
+            corner_radius=6,
+            command=self._on_run_preflight_clicked,
+        )
+        self.btn_preflight.pack(side="left", padx=6)
+
+        self.btn_paste_proxy = self._create_action_btn("📋  Вставить из буфера", self._on_paste_proxies_clicked)
+        self.btn_paste_proxy.pack(side="left", padx=6)
+
+        self.btn_open_data_folder = self._create_action_btn("📁  Папка data/", lambda: self._open_folder(Path("data")))
+        self.btn_open_data_folder.pack(side="left", padx=6)
+
+        self.btn_refresh_proxies = self._create_action_btn("🔄  Обновить списки", self._refresh_proxy_tab_data)
+        self.btn_refresh_proxies.pack(side="left", padx=6)
+
+        # 3. Pre-flight Progress Panel (hidden by default)
+        self.frame_preflight_progress = ctk.CTkFrame(
+            self.tab_proxies,
+            fg_color=COLOR_CARD_INNER,
+            border_color="#334155",
+            border_width=1,
+            corner_radius=8,
+        )
+
+        self.lbl_preflight_title = ctk.CTkLabel(
+            self.frame_preflight_progress,
+            text="⚡ Выполняется Pre-flight проверка прокси (TCP ping & HTTP probe)...",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#f8fafc",
+        )
+        self.lbl_preflight_title.pack(anchor="w", padx=12, pady=(10, 4))
+
+        self.progress_preflight = ctk.CTkProgressBar(
+            self.frame_preflight_progress,
+            height=10,
+            progress_color=COLOR_BTN_PRIMARY,
+        )
+        self.progress_preflight.pack(fill="x", padx=12, pady=6)
+        self.progress_preflight.set(0.0)
+
+        self.lbl_preflight_info = ctk.CTkLabel(
+            self.frame_preflight_progress,
+            text="Проверено: 0 / 0 | Good: 0 | Slow: 0 | Bad: 0",
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color="#94a3b8",
+        )
+        self.lbl_preflight_info.pack(anchor="w", padx=12, pady=(2, 10))
+
+        # 4. Preview Tabview for the 3 Proxy Files
+        self.tabview_proxies = ctk.CTkTabview(
+            self.tab_proxies,
+            fg_color="transparent",
+            segmented_button_fg_color="#0f172a",
+            segmented_button_selected_color=COLOR_BTN_PRIMARY,
+            segmented_button_selected_hover_color=COLOR_BTN_PRIMARY_HOVER,
+            segmented_button_unselected_color="#182038",
+            segmented_button_unselected_hover_color="#202c4c",
+            text_color=COLOR_TEXT_PRIMARY,
+            corner_radius=8,
+        )
+        self.tabview_proxies.pack(fill="both", expand=True, padx=4, pady=(4, 6))
+
+        self.subtab_good = self.tabview_proxies.add("✅  Быстрые прокси (Good)")
+        self.subtab_slow = self.tabview_proxies.add("⚠️  Резервные прокси (Slow)")
+        self.subtab_bad = self.tabview_proxies.add("❌  Нерабочие (Bad)")
+
+        self.txt_good_proxies = ctk.CTkTextbox(
+            self.subtab_good,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color="#0b0f19",
+            text_color="#34d399",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=8,
+            wrap="none",
+        )
+        self.txt_good_proxies.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.txt_slow_proxies = ctk.CTkTextbox(
+            self.subtab_slow,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color="#0b0f19",
+            text_color="#fbbf24",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=8,
+            wrap="none",
+        )
+        self.txt_slow_proxies.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.txt_bad_proxies = ctk.CTkTextbox(
+            self.subtab_bad,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color="#0b0f19",
+            text_color="#fb7185",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=8,
+            wrap="none",
+        )
+        self.txt_bad_proxies.pack(fill="both", expand=True, padx=4, pady=4)
+
+    @staticmethod
+    def _set_textbox_content(tb: ctk.CTkTextbox, text: str) -> None:
+        tb.configure(state="normal")
+        tb.delete("1.0", "end")
+        tb.insert("1.0", text)
+        tb.configure(state="disabled")
+
+    def _refresh_proxy_tab_data(self) -> None:
+        """Refresh proxy tab stats and previews from disk."""
+        good = ProxyManager.load_proxies(self.proxy_manager.good_proxies_file)
+        slow = ProxyManager.load_proxies(self.proxy_manager.slow_proxies_file)
+        bad_text = ""
+        bad_count = 0
+        if self.proxy_manager.bad_proxies_file.exists():
+            try:
+                bad_text = self.proxy_manager.bad_proxies_file.read_text(encoding="utf-8", errors="ignore")
+                bad_count = len([l for l in bad_text.splitlines() if l.strip()])
+            except Exception:
+                pass
+
+        in_use_count = len(self.proxy_manager.in_use_proxies) if hasattr(self.proxy_manager, "in_use_proxies") else 0
+
+        self.stat_proxy_good.lbl_val.configure(text=str(len(good)))
+        self.stat_proxy_slow.lbl_val.configure(text=str(len(slow)))
+        self.stat_proxy_bad.lbl_val.configure(text=str(bad_count))
+        self.stat_proxy_in_use.lbl_val.configure(text=str(in_use_count))
+
+        if hasattr(self, "stat_proxies"):
+            self.stat_proxies.lbl_val.configure(text=f"Good: {len(good)} | Slow: {len(slow)}")
+
+        self._set_textbox_content(self.txt_good_proxies, "\n".join(good) if good else "— Список пуст —")
+        self._set_textbox_content(self.txt_slow_proxies, "\n".join(slow) if slow else "— Список пуст —")
+        self._set_textbox_content(self.txt_bad_proxies, bad_text if bad_text else "— Список пуст —")
+
+    def _on_load_proxy_file_clicked(self) -> None:
+        """File picker for proxy file with automatic extraction and prompt."""
+        file_path = filedialog.askopenfilename(
+            title="Выберите файл со списком прокси",
+            filetypes=[("Proxy Files", "*.txt *.csv"), ("All Files", "*.*")],
+        )
+        if not file_path:
+            return
+        extracted = ProxyManager.extract_proxies_from_file(Path(file_path))
+        if not extracted:
+            messagebox.showwarning("Прокси не найдены", "В выбранном файле не найдено валидных прокси (IPv4:PORT).")
+            return
+
+        prompt = (
+            f"Найдено {len(extracted)} валидных прокси!\n\n"
+            f"Хотите запустить Pre-flight проверку прямо сейчас?\n"
+            f"• 'Да' — проверить пинг/HTTP и распределить на Good/Slow/Bad.\n"
+            f"• 'Нет' — просто добавить в пул good_proxies.txt без проверки."
+        )
+        if messagebox.askyesno("Загрузка прокси", prompt):
+            self._start_preflight_check(extracted)
+        else:
+            added = ProxyManager.smart_append_and_merge(self.proxy_manager.good_proxies_file, extracted)
+            self._refresh_proxy_tab_data()
+            messagebox.showinfo("Сохранено", f"Добавлено {added} новых прокси в good_proxies.txt.")
+
+    def _on_run_preflight_clicked(self) -> None:
+        """Run pre-flight check across all existing good/slow proxies."""
+        all_proxies = ProxyManager.load_proxies(self.proxy_manager.good_proxies_file) + ProxyManager.load_proxies(self.proxy_manager.slow_proxies_file)
+        unique = list(dict.fromkeys(all_proxies))
+        if not unique:
+            messagebox.showwarning(
+                "Нет прокси",
+                "В пулах good_proxies.txt и slow_proxies.txt нет прокси для проверки.\n"
+                "Сначала загрузите прокси из файла или вставьте из буфера обмена."
+            )
+            return
+        self._start_preflight_check(unique)
+
+    def _on_paste_proxies_clicked(self) -> None:
+        """Paste proxies directly from clipboard with regex extraction."""
+        try:
+            text = self.clipboard_get()
+        except Exception:
+            messagebox.showwarning("Буфер пуст", "Не удалось прочитать текст из буфера обмена.")
+            return
+        extracted = ProxyManager.extract_proxies_from_text(text)
+        if not extracted:
+            messagebox.showwarning("Прокси не найдены", "В буфере обмена не найдено валидных прокси формата IP:PORT или IP:PORT:USER:PASS.")
+            return
+
+        prompt = (
+            f"Извлечено из буфера {len(extracted)} валидных прокси!\n\n"
+            f"Запустить Pre-flight проверку прямо сейчас?"
+        )
+        if messagebox.askyesno("Прокси из буфера", prompt):
+            self._start_preflight_check(extracted)
+        else:
+            added = ProxyManager.smart_append_and_merge(self.proxy_manager.good_proxies_file, extracted)
+            self._refresh_proxy_tab_data()
+            messagebox.showinfo("Сохранено", f"Добавлено {added} новых прокси в good_proxies.txt.")
+
+    def _start_preflight_check(self, proxies: List[str]) -> None:
+        """Run pre-flight check asynchronously in background thread."""
+        if not proxies:
+            return
+        self.btn_preflight.configure(state="disabled")
+        self.btn_load_proxy_file.configure(state="disabled")
+        self.frame_preflight_progress.pack(fill="x", padx=6, pady=(0, 10), before=self.tabview_proxies)
+        self.progress_preflight.set(0.0)
+        self.lbl_preflight_info.configure(text=f"Подготовка к проверке {len(proxies)} прокси...")
+
+        self._log(f"⚡ Запуск Pre-flight проверки для {len(proxies)} прокси...")
+
+        def worker():
+            async def run():
+                def on_prog(completed, total, res):
+                    self.event_queue.put(("preflight_progress", completed, total, res.status))
+
+                results = await self.proxy_manager.run_preflight_check(
+                    proxies=proxies,
+                    concurrency=25,
+                    use_http_probe=True,
+                    on_progress=on_prog,
+                )
+                self.event_queue.put(("preflight_done", results))
+
+            asyncio.run(run())
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1462,6 +2073,44 @@ class EtixGuiApp(ctk.CTk):
                         self.show_cards[res.show_id].update_result(res)
                     self._log(f"[{res.status.value}] {res.name} — Резерв: {res.reserved}/{res.target} ({res.details})")
 
+                elif kind == "preflight_progress":
+                    completed, total, status = msg[1], msg[2], msg[3]
+                    pct = completed / max(1, total)
+                    self.progress_preflight.set(pct)
+                    self.lbl_preflight_info.configure(
+                        text=f"Проверено: {completed} / {total} ({int(pct * 100)}%) — Последний статус: {status}"
+                    )
+
+                elif kind == "preflight_done":
+                    res_dict = msg[1]
+                    self.btn_preflight.configure(state="normal")
+                    self.btn_load_proxy_file.configure(state="normal")
+                    self.frame_preflight_progress.pack_forget()
+
+                    good_count = len(res_dict.get("good", []))
+                    slow_count = len(res_dict.get("slow", []))
+                    bad_count = len(res_dict.get("bad", []))
+                    total = good_count + slow_count + bad_count
+
+                    self._refresh_proxy_tab_data()
+                    self._log(
+                        f"⚡ Pre-flight проверка завершена ({total} прокси): "
+                        f"Good: {good_count}, Slow: {slow_count}, Bad: {bad_count}."
+                    )
+                    messagebox.showinfo(
+                        "Pre-flight проверка завершена",
+                        f"Результаты проверки ({total} прокси):\n\n"
+                        f"✅ Быстрые (Good <1.5s): {good_count} шт.\n"
+                        f"⚠️ Резервные (Slow 1.5–2.5s): {slow_count} шт.\n"
+                        f"❌ Нерабочие (Bad >2.5s): {bad_count} шт.\n\n"
+                        f"Списки сохранены в data/good_proxies.txt и data/slow_proxies.txt.",
+                    )
+
+                elif kind == "proxy_pool_slow_transition":
+                    self._log("⚠️ [ВНИМАНИЕ] Пул быстрых прокси исчерпан! Чекер переключился на резервный пул медленных прокси.")
+                    if hasattr(self, "stat_proxies"):
+                        self.stat_proxies.lbl_val.configure(text="⚠️ Медленный пул", text_color="#fbbf24")
+
                 elif kind == "check_completed":
                     self.profile_manager.reset_session_statuses()
                     results: List[CheckResult] = msg[1]
@@ -1472,6 +2121,8 @@ class EtixGuiApp(ctk.CTk):
                     total_tgt = sum(r.target for r in results)
                     self.stat_reserved.lbl_val.configure(text=f"{total_res} / {total_tgt}")
                     self._log("🎉 Проверка успешно завершена. Отчет сохранен в report.csv.")
+                    self._update_blocked_badge()
+                    self._refresh_proxy_tab_data()
 
                     # Check for blocked profiles recorded in this session
                     blocked = self.profile_manager.get_session_blocked_profiles()
@@ -1486,15 +2137,7 @@ class EtixGuiApp(ctk.CTk):
                         self._log("📝 Полный список сохранен в 'data/blocked_profiles.txt'.")
                         self._log("⚠️ =========================================")
 
-                        prompt_msg = (
-                            f"Проверка завершена!\n\n"
-                            f"⚠️ ОБНАРУЖЕНЫ БЛОКИРОВКИ НА {len(blocked)} ПРОФИЛЯХ:\n\n"
-                            + "\n".join(details_lines[:8])
-                            + (f"\n...и еще {len(blocked) - 8} шт." if len(blocked) > 8 else "")
-                            + "\n\n💡 Список сохранен в файле: data/blocked_profiles.txt\n"
-                            f"Рекомендуется сменить прокси или обновить цифровой отпечаток в AdsPower!"
-                        )
-                        messagebox.showwarning("Внимание: Заблокированные профили", prompt_msg)
+                        self._show_blocked_profiles_modal()
                     else:
                         messagebox.showinfo("Готово", "Проверка завершена! Результаты сохранены в report.csv.")
 

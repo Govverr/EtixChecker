@@ -316,7 +316,7 @@ class EtixCheckEngine:
             LOGGER.warning(f"Navigation failed for primary worker on {show.url}: {exc}")
             if self.detector.is_bad_proxy_error(exc) and self.cdp_pool:
                 LOGGER.info("Attempting Hot-Swap for primary worker due to dead/timed out proxy...")
-                new_primary = await self.cdp_pool.in_place_proxy_swap(
+                new_primary = await self.cdp_pool.replace_worker_with_reserve(
                     primary_worker, reason=f"Primary nav error: {exc}"
                 )
                 if new_primary:
@@ -513,7 +513,7 @@ class EtixCheckEngine:
 
         ready_results = await asyncio.gather(*ready_tasks, return_exceptions=True)
 
-        if self.cdp_pool and self.cdp_pool.is_circuit_breaker_tripped():
+        if self.cdp_pool and getattr(self.cdp_pool, 'is_circuit_breaker_tripped', lambda: False)() is True:
             LOGGER.critical(
                 "Circuit Breaker Tripped! Stopping run due to 8 consecutive DataDome 'bv' blocks."
             )
@@ -618,7 +618,7 @@ class EtixCheckEngine:
                         )
                         if self.cdp_pool:
                             try:
-                                new_w = await self.cdp_pool.in_place_proxy_swap(
+                                new_w = await self.cdp_pool.replace_worker_with_reserve(
                                     worker, reason=f"Add to Cart blocked: {msg}"
                                 )
                                 if not new_w:
@@ -877,7 +877,7 @@ class EtixCheckEngine:
                         LOGGER.info(
                             f"[Worker #{current_worker.worker_index}] Hot-swapping due to bad proxy (Swap {swaps_done + 1}/{max_profile_swaps})..."
                         )
-                        new_w = await self.cdp_pool.in_place_proxy_swap(
+                        new_w = await self.cdp_pool.replace_worker_with_reserve(
                             current_worker, reason="Bad proxy connection error"
                         )
                         if new_w:
@@ -920,7 +920,7 @@ class EtixCheckEngine:
                                 current_worker.profile.proxy_key, "DataDome Blocked (verdict=bv)"
                             )
                         if swaps_done < max_profile_swaps and self.cdp_pool:
-                            new_w = await self.cdp_pool.in_place_proxy_swap(
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
                                 current_worker, reason="DataDome Hard Block (verdict=bv)"
                             )
                             if new_w:
@@ -1098,7 +1098,7 @@ class EtixCheckEngine:
                                 f"[Worker #{current_worker.worker_index}] Closing blocked profile '{current_worker.profile.name}' "
                                 f"and opening reserve from group (Replacement {swaps_done + 1}/{max_profile_swaps})..."
                             )
-                            new_w = await self.cdp_pool.in_place_proxy_swap(
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
                                 current_worker,
                                 reason=reason
                             )
@@ -1176,7 +1176,7 @@ class EtixCheckEngine:
                                 current_worker.profile.proxy_key, f"reCAPTCHA on entry: {r_reason}"
                             )
                         if swaps_done < max_profile_swaps and self.cdp_pool:
-                            new_w = await self.cdp_pool.in_place_proxy_swap(
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
                                 current_worker, reason=f"reCAPTCHA on entry: {r_reason}"
                             )
                             if new_w:
@@ -1241,7 +1241,7 @@ class EtixCheckEngine:
                             current_worker.profile.proxy_key, "DataDome Blocked"
                         )
                     if swaps_done < max_profile_swaps and self.cdp_pool:
-                        new_w = await self.cdp_pool.in_place_proxy_swap(
+                        new_w = await self.cdp_pool.replace_worker_with_reserve(
                             current_worker, reason="DataDome: Access Temporarily Blocked"
                         )
                         if new_w:
@@ -1315,7 +1315,7 @@ class EtixCheckEngine:
                                 current_worker.profile.proxy_key, "DataDome Blocked after reload"
                             )
                         if swaps_done < max_profile_swaps and self.cdp_pool:
-                            new_w = await self.cdp_pool.in_place_proxy_swap(
+                            new_w = await self.cdp_pool.replace_worker_with_reserve(
                                 current_worker, reason="DataDome Blocked after reload"
                             )
                             if new_w:
@@ -1363,7 +1363,7 @@ class EtixCheckEngine:
                         await self.reporter.save_screenshot(current_worker.page, show.name, prefix="controls_missing")
                     except Exception:
                         pass
-                    new_w = await self.cdp_pool.in_place_proxy_swap(
+                    new_w = await self.cdp_pool.replace_worker_with_reserve(
                         current_worker, reason="Controls missing / page unresponsive"
                     )
                     if new_w:
@@ -1392,7 +1392,7 @@ class EtixCheckEngine:
                     f"[Worker #{current_worker.worker_index}] Readiness check exception on {current_worker.profile.name}: {exc}"
                 )
                 if swaps_done < max_profile_swaps and self.cdp_pool:
-                    new_w = await self.cdp_pool.in_place_proxy_swap(
+                    new_w = await self.cdp_pool.replace_worker_with_reserve(
                         current_worker, reason=f"Readiness error: {exc}"
                     )
                     if new_w:

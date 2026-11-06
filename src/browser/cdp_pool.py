@@ -509,9 +509,13 @@ class CDPBrowserPool:
         reason: str = "DataDome block",
         max_attempts: Optional[int] = None,
     ) -> Optional[BrowserWorker]:
-        """Public thread-safe interface for replacing worker with reserve profile from group."""
-        async with self._lock:
-            return await self._replace_worker_with_reserve_unlocked(failing_worker, reason, max_attempts)
+        """
+        Public thread-safe interface for worker hot-swap.
+        Executes Two-Level Cascade:
+          Level 1: In-Place Hot-Swap v2 (updating proxy via API without creating new profiles).
+          Level 2: Fallback to Reserve profiles from AdsPower group.
+        """
+        return await self.in_place_proxy_swap(failing_worker, reason=reason)
 
     async def _replace_worker_with_reserve_unlocked(
         self,
