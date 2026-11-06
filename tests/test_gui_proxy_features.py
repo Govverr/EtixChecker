@@ -322,40 +322,36 @@ class TestGuiProxyFeatures(unittest.TestCase):
             is_blk3 = asyncio.run(detector.is_blocked_page(page3))
             self.assertFalse(is_blk3, "Solvable slider must NOT be classified as hard block")
 
-    def test_humanize_changelog_and_translation(self):
-        """Verify _translate_commit_line and humanize_changelog translate technical messages into friendly Russian."""
-        from src.utils.updater import _translate_commit_line, humanize_changelog
+    def test_release_notes_and_formatting(self):
+        """Verify clean_release_notes, get_local_release_notes, and release notes reading."""
+        from src.utils.updater import UpdateService, clean_release_notes, humanize_changelog
 
-        # 1. Commit line translation
-        line1 = "fix(datadome): fast-swap hard-blocked datadome pages"
-        trans1 = _translate_commit_line(line1)
-        self.assertIn("Защита DataDome", trans1)
-        self.assertIn("замена страниц", trans1.lower())
-
-        line2 = "feat(proxy): add toggle switch for auto proxy hot-swap"
-        trans2 = _translate_commit_line(line2)
-        self.assertIn("Прокси", trans2)
-        self.assertIn("переключатель", trans2.lower())
-
-        # 2. Raw message translation with humanize_changelog
-        raw_msg = (
-            "fix(datadome): fast-swap hard-blocked datadome pages\n"
-            "feat(gui): make top dashboard cards compact\n"
-            "Signed-off-by: Developer <dev@example.com>\n"
+        # 1. Formatting user-authored lines
+        raw_notes = (
+            "Защита DataDome: мгновенная замена страниц\n"
+            "• Добавлен тумблер автозамены прокси в профилях\n"
+            "- Сохранение списка заблокированных профилей\n"
         )
-        res = humanize_changelog(raw_msg)
-        self.assertIn("•", res)
-        self.assertIn("Защита DataDome", res)
-        self.assertNotIn("Signed-off-by", res)
+        formatted = clean_release_notes(raw_notes)
+        lines = formatted.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("• "))
+        self.assertTrue(lines[1].startswith("• "))
+        self.assertTrue(lines[2].startswith("- "))
 
-        # 3. GitHub compare API commits list
-        commits_data = [
-            {"commit": {"message": "feat(proxy): add toggle switch for auto proxy hot-swap on adspower profiles"}},
-            {"commit": {"message": "fix: prevent session report erasure on check finish"}},
-        ]
-        res_commits = humanize_changelog("fallback", commits=commits_data)
-        self.assertIn("переключатель автоматической замены прокси", res_commits.lower())
-        self.assertIn("сохранение списка заблокированных профилей", res_commits.lower())
+        # 2. Local release notes loading from file
+        test_dir = self.temp_path / "test_updater"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        notes_file = test_dir / "RELEASE_NOTES.txt"
+        notes_file.write_text("• Тестовое обновление\n• Второе улучшение", encoding="utf-8")
+
+        svc = UpdateService(root_dir=test_dir)
+        local_notes = svc.get_local_release_notes()
+        self.assertIn("Тестовое обновление", local_notes)
+        self.assertIn("Второе улучшение", local_notes)
+
+        # 3. humanize_changelog alias
+        self.assertEqual(humanize_changelog("• Тест"), "• Тест")
 
     def test_proxy_swap_toggle_switch_logic(self):
         """Verify proxy swap toggle switch updates state labels, global config, and calls save_delays_to_dotenv."""
