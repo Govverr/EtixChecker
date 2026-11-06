@@ -150,6 +150,7 @@ class AppConfig:
     delay_before_clear_carts_s: float = float(os.getenv("ETIX_DELAY_BEFORE_CLEAR_CARTS_S", "4.0"))
     clear_cart_stagger_ms: Tuple[int, int] = _env_range_ms("ETIX_CLEAR_CART_STAGGER_MS", (600, 1000))
     strict_all_carts: bool = _env_bool("ETIX_STRICT_ALL_CARTS", True)
+    auto_swap_profile_proxy: bool = _env_bool("AUTO_SWAP_PROFILE_PROXY", True)
 
     # File paths
     data_dir: Path = Path("data")

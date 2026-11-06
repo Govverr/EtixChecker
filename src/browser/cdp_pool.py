@@ -511,11 +511,25 @@ class CDPBrowserPool:
     ) -> Optional[BrowserWorker]:
         """
         Public thread-safe interface for worker hot-swap.
-        Executes Two-Level Cascade:
+        If auto_swap_profile_proxy is True:
           Level 1: In-Place Hot-Swap v2 (updating proxy via API without creating new profiles).
           Level 2: Fallback to Reserve profiles from AdsPower group.
+        If auto_swap_profile_proxy is False:
+          Immediately closes problematic profile and switches to reserve profile from group (Level 2 legacy behavior).
         """
-        return await self.in_place_proxy_swap(failing_worker, reason=reason)
+        auto_swap_enabled = getattr(self.config, "auto_swap_profile_proxy", True)
+        if auto_swap_enabled:
+            return await self.in_place_proxy_swap(failing_worker, reason=reason)
+
+        LOGGER.info(
+            f"[Worker #{failing_worker.worker_index}] Автоматическая замена прокси в профиле выключена в настройках. "
+            f"Закрываем проблемный профиль '{failing_worker.profile.name}' ({failing_worker.profile.user_id}) "
+            f"и переключаемся на резервный профиль из папки AdsPower..."
+        )
+        async with self._lock:
+            return await self._replace_worker_with_reserve_unlocked(
+                failing_worker, reason=reason, max_attempts=max_attempts
+            )
 
     async def _replace_worker_with_reserve_unlocked(
         self,

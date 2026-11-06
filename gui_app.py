@@ -2215,7 +2215,11 @@ class EtixGuiApp(ctk.CTk):
             async def run():
                 global CONFIG
                 CONFIG = reload_config()
-                active_cfg = dataclasses.replace(CONFIG, adspower_group_name=selected_group)
+                active_cfg = dataclasses.replace(
+                    CONFIG,
+                    adspower_group_name=selected_group,
+                    auto_swap_profile_proxy=bool(self._var_proxy_swap.get()) if hasattr(self, "_var_proxy_swap") else getattr(CONFIG, "auto_swap_profile_proxy", True),
+                )
                 engine = EtixCheckEngine(
                     config=active_cfg,
                     client=self.client,
@@ -2260,6 +2264,7 @@ class EtixGuiApp(ctk.CTk):
 
     def _start_update_download(self, version_info: Optional[VersionInfo]) -> None:
         self.btn_updates.configure(state="disabled", text="⏳  Обновление...")
+        self._pending_update_summary = getattr(version_info, "changelog_summary", "") if version_info else ""
         self._log("⬇️ Скачивание и применение обновления...")
 
         def worker():
@@ -2456,6 +2461,44 @@ class EtixGuiApp(ctk.CTk):
         )
         self.btn_refresh_proxies.pack(side="left", padx=6)
 
+        # Toggle Switch: Auto-swap proxy on AdsPower profiles
+        self.frame_proxy_swap_toggle = ctk.CTkFrame(
+            self.proxy_actions_bar,
+            fg_color="#1e293b",
+            border_color="#334155",
+            border_width=1,
+            corner_radius=8,
+            height=34,
+        )
+        self.frame_proxy_swap_toggle.pack(side="right", padx=(6, 0))
+
+        initial_swap_state = bool(getattr(CONFIG, "auto_swap_profile_proxy", True))
+        self._var_proxy_swap = ctk.BooleanVar(value=initial_swap_state)
+
+        self.switch_proxy_swap = ctk.CTkSwitch(
+            self.frame_proxy_swap_toggle,
+            text="Автозамена прокси Ads",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+            variable=self._var_proxy_swap,
+            onvalue=True,
+            offvalue=False,
+            command=self._on_auto_proxy_swap_toggled,
+            progress_color="#10b981",
+            button_color="#f8fafc",
+            button_hover_color="#e2e8f0",
+            width=42,
+        )
+        self.switch_proxy_swap.pack(side="left", padx=(10, 6), pady=4)
+
+        self.lbl_proxy_swap_state = ctk.CTkLabel(
+            self.frame_proxy_swap_toggle,
+            text="",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10, weight="bold"),
+        )
+        self.lbl_proxy_swap_state.pack(side="left", padx=(0, 10), pady=4)
+
+        self._update_proxy_swap_ui(initial_swap_state)
+
         # 3. Pre-flight Progress Panel (hidden by default)
         self.frame_preflight_progress = ctk.CTkFrame(
             self.tab_proxies,
@@ -2549,6 +2592,43 @@ class EtixGuiApp(ctk.CTk):
         tb.delete("1.0", "end")
         tb.insert("1.0", text)
         tb.configure(state="disabled")
+
+    def _update_proxy_swap_ui(self, is_on: bool) -> None:
+        """Update switch styling and status label based on toggle state."""
+        if not hasattr(self, "lbl_proxy_swap_state"):
+            return
+        if is_on:
+            self.lbl_proxy_swap_state.configure(
+                text="[ВКЛ: замена в профиле]",
+                text_color="#34d399",
+            )
+        else:
+            self.lbl_proxy_swap_state.configure(
+                text="[ВЫКЛ: смена профиля]",
+                text_color="#fbbf24",
+            )
+
+    def _on_auto_proxy_swap_toggled(self) -> None:
+        """Handle toggling automatic proxy swap on AdsPower profile."""
+        is_on = bool(self._var_proxy_swap.get())
+        self._update_proxy_swap_ui(is_on)
+
+        # 1. Update global CONFIG and os.environ
+        global CONFIG
+        CONFIG = dataclasses.replace(CONFIG, auto_swap_profile_proxy=is_on)
+        os.environ["AUTO_SWAP_PROFILE_PROXY"] = str(is_on).lower()
+
+        # 2. Persist to .env safely
+        try:
+            save_delays_to_dotenv({"AUTO_SWAP_PROFILE_PROXY": str(is_on).lower()})
+        except Exception as exc:
+            LOGGER.warning(f"Failed to persist AUTO_SWAP_PROFILE_PROXY to .env: {exc}")
+
+        # 3. Inform user in log
+        if is_on:
+            self._log("⚡ Автозамена прокси в Ads: ВКЛ (при бане DataDome чекер заменит прокси в профиле из good_proxies.txt).")
+        else:
+            self._log("🔄 Автозамена прокси в Ads: ВЫКЛ (при бане DataDome чекер закроет проблемный профиль и возьмёт резервный из папки).")
 
     def _refresh_proxy_tab_data(self) -> None:
         """Refresh proxy tab stats and previews from disk."""
@@ -2718,12 +2798,16 @@ class EtixGuiApp(ctk.CTk):
                         messagebox.showinfo("Обновления", f"У вас установлена самая свежая версия программы ({ver_str}{date_str})!")
                     else:
                         assert version_info is not None
+                        summary_text = getattr(version_info, "changelog_summary", "").strip()
                         self._log(f"🎉 Найдено обновление: {version_info.short_sha} — {version_info.message}")
+                        if summary_text:
+                            self._log(f"📋 Что нового в обновлении:\n{summary_text}")
+
+                        changelog_block = f"Что изменилось (простыми словами):\n{summary_text}\n\n" if summary_text else ""
                         update_prompt = (
                             f"🎉 Доступна новая версия программы!\n\n"
-                            f"Коммит: {version_info.short_sha}\n"
-                            f"Дата: {version_info.date}\n"
-                            f"Описание: {version_info.message}\n\n"
+                            f"Версия: {version_info.short_sha} (от {version_info.date})\n\n"
+                            f"{changelog_block}"
                             f"⚠️ Пользовательские настройки (.env, shows.csv, прокси) будут сохранены.\n\n"
                             f"Обновить программу прямо сейчас в 1 клик?"
                         )
@@ -2735,7 +2819,12 @@ class EtixGuiApp(ctk.CTk):
                     ok, res_msg = msg[1], msg[2]
                     if ok:
                         self._log(f"🎉 {res_msg}")
-                        messagebox.showinfo("Обновление завершено", f"{res_msg}\n\nПожалуйста, перезапустите приложение для вступления изменений в силу.")
+                        summary_text = getattr(self, "_pending_update_summary", "").strip()
+                        summary_block = f"\n\nЧто было обновлено:\n{summary_text}" if summary_text else ""
+                        messagebox.showinfo(
+                            "Обновление завершено",
+                            f"{res_msg}{summary_block}\n\nПожалуйста, перезапустите приложение для вступления изменений в силу."
+                        )
                     else:
                         self._log(f"❌ Ошибка обновления: {res_msg}")
                         messagebox.showerror("Ошибка обновления", res_msg)

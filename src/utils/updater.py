@@ -49,6 +49,7 @@ class VersionInfo:
     message: str
     author: str
     date: str
+    changelog_summary: str = ""
 
     def to_dict(self) -> Dict[str, str]:
         return {
@@ -57,7 +58,138 @@ class VersionInfo:
             "message": self.message,
             "author": self.author,
             "date": self.date,
+            "changelog_summary": self.changelog_summary,
         }
+
+
+def _translate_commit_line(text: str) -> str:
+    """Translate technical commit line into friendly, simple Russian words."""
+    if not text:
+        return ""
+
+    import re
+
+    has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in text)
+
+    prefix_map = [
+        (r"^fix\(datadome\)\s*:\s*", "🛡️ Защита DataDome: "),
+        (r"^fix\(checker\)\s*:\s*", "🛠 Чекер: "),
+        (r"^fix\(gui\)\s*:\s*", "🎨 Интерфейс: "),
+        (r"^fix\(proxy\)\s*:\s*", "⚡ Прокси: "),
+        (r"^fix\(pool\)\s*:\s*", "🔄 Профили: "),
+        (r"^fix\s*:\s*", "🛠 Исправление: "),
+        (r"^feat\(datadome\)\s*:\s*", "🛡️ Защита DataDome: "),
+        (r"^feat\(proxy\)\s*:\s*", "⚡ Прокси: "),
+        (r"^feat\(pool\)\s*:\s*", "🔄 Профили: "),
+        (r"^feat\(gui\)\s*:\s*", "🎨 Новый интерфейс: "),
+        (r"^feat\s*:\s*", "✨ Новая функция: "),
+        (r"^style\(gui\)\s*:\s*", "🎨 Внешний вид: "),
+        (r"^style\s*:\s*", "🎨 Внешний вид: "),
+        (r"^perf\(checker\)\s*:\s*", "🚀 Ускорение: "),
+        (r"^perf\s*:\s*", "🚀 Ускорение: "),
+        (r"^refactor\s*:\s*", "♻️ Оптимизация: "),
+    ]
+
+    prefix_tag = ""
+    for pat, tag in prefix_map:
+        if re.search(pat, text, flags=re.I):
+            text = re.sub(pat, "", text, flags=re.I).strip()
+            prefix_tag = tag
+            break
+
+    if has_cyrillic:
+        return f"{prefix_tag}{text}"
+
+    replacements = [
+        ("fix blocked profile detection and prevent session report erasure on check finish", "исправление обнаружения заблокированных профилей и сохранение списка блокировок"),
+        ("fix blocked profile detection", "исправление обнаружения заблокированных профилей"),
+        ("prevent session report erasure on check finish", "сохранение списка заблокированных профилей после завершения проверки"),
+        ("prevent session report erasure", "сохранение списка заблокированных профилей"),
+        ("fast-swap hard-blocked datadome pages", "мгновенная замена страниц при блокировке DataDome"),
+        ("expand card height to 88px", "увеличение размера карточек мониторинга для удобства чтения"),
+        ("reset blocked profiles per run", "сброс журнала заблокированных профилей перед каждой новой проверкой"),
+        ("make top dashboard cards compact", "компактный вид верхних карточек дашборда"),
+        ("implement modern saas dashboard cards", "новый современный дизайн карточек мониторинга"),
+        ("make proxy stat cards compact and prevent stretching", "компактный вид карточек статистики прокси"),
+        ("consolidate top toolbar with tools dropdown and polish proxy cards", "объединение кнопок верхней панели в меню инструментов и улучшение карточек"),
+        ("add proxy management, pre-flight check dialog, and blocked profiles modal", "менеджер прокси, быстрая проверка (Pre-flight) и окно заблокированных профилей"),
+        ("add proxy management", "менеджер прокси"),
+        ("pre-flight check dialog", "предварительная проверка прокси (Pre-flight)"),
+        ("blocked profiles modal", "окно заблокированных профилей"),
+        ("implement in-place hot-swap v2, two-level cascade, and circuit breaker", "автозамена прокси в профилях (In-Place Hot-Swap) и двухуровневый каскад замен"),
+        ("add proxymanager with regex extraction, socket ping, http probe, and pool management", "умный менеджер прокси с проверкой пинга и автоматическим пулом"),
+        ("add toggle switch for auto proxy hot-swap on adspower profiles", "добавлен переключатель автоматической замены прокси в профилях AdsPower"),
+        ("add toggle switch for auto proxy hot-swap", "добавлен переключатель автоматической замены прокси"),
+        ("add toggle switch", "добавлен переключатель"),
+        ("auto proxy hot-swap", "автоматическая замена прокси в профилях"),
+        ("in-place hot-swap", "горячая замена прокси в профиле"),
+        ("two-level cascade", "двухуровневый каскад замен"),
+        ("optimize readiness timeouts and guarantee crash dumps before worker stops", "оптимизация таймаутов готовности и сохранение диагностических дампов"),
+        ("untrack tasks.md and add to .gitignore", "улучшение безопасности и очистка репозитория"),
+        ("untrack project_knowledge.md and add to .gitignore", "улучшение безопасности и очистка репозитория"),
+        ("update project_knowledge.md and tasks.md", "обновление документации"),
+        ("prevent hanging window", "устранение зависания окон браузера"),
+        ("prevent window hanging", "устранение зависания окон браузера"),
+    ]
+
+    lower_text = text.lower()
+    for eng, rus in replacements:
+        if eng in lower_text:
+            pattern = re.compile(re.escape(eng), re.IGNORECASE)
+            text = pattern.sub(rus, text)
+
+    text = text.strip()
+    if text:
+        text = text[0].upper() + text[1:]
+
+    return f"{prefix_tag}{text}"
+
+
+def humanize_changelog(raw_message: str, commits: Optional[List[Dict[str, Any]]] = None) -> str:
+    """
+    Generate a clear, human-friendly changelog summary in simple Russian.
+    Translates technical commit messages and formats bullet points.
+    """
+    if commits:
+        items = []
+        for c in commits:
+            msg = (c.get("commit", {}).get("message") or "").strip()
+            if not msg:
+                continue
+            first_line = msg.split("\n")[0].strip()
+            friendly = _translate_commit_line(first_line)
+            if friendly and friendly not in items:
+                items.append(friendly)
+        if items:
+            return "\n".join(f"• {it}" for it in items[:6])
+
+    lines = [l.strip() for l in raw_message.splitlines() if l.strip()]
+    if not lines:
+        return "• Общие улучшения и исправления стабильности программы"
+
+    clean_lines = []
+    for line in lines:
+        lower = line.lower()
+        if any(lower.startswith(k) for k in [
+            "signed-off-by:", "co-authored-by:", "merge branch", "merge pull request"
+        ]):
+            continue
+        clean_lines.append(line)
+
+    if not clean_lines:
+        return "• Общие улучшения и исправления стабильности программы"
+
+    items = []
+    for idx, line in enumerate(clean_lines):
+        is_bullet = line.startswith(("- ", "* ", "• "))
+        stripped = line.lstrip("-*• ").strip()
+        translated = _translate_commit_line(stripped)
+        if idx == 0 and not is_bullet:
+            items.append(f"• {translated}")
+        else:
+            items.append(f"  — {translated}")
+
+    return "\n".join(items[:6])
 
 
 class UpdateService:
@@ -130,9 +262,26 @@ class UpdateService:
                 data = resp.json()
                 sha = data.get("sha", "")
                 commit_dict = data.get("commit", {})
-                message = commit_dict.get("message", "").split("\n")[0]
+                full_message = commit_dict.get("message", "")
+                message = full_message.split("\n")[0]
                 author = commit_dict.get("author", {}).get("name", "Unknown")
                 date = commit_dict.get("author", {}).get("date", "")
+
+                local_info = self.get_local_version()
+
+                # Fetch compare commits if local SHA is known to get all commits in the update
+                commits_list = None
+                if local_info and local_info.sha and sha and local_info.sha.lower() != sha.lower():
+                    try:
+                        compare_url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/compare/{local_info.sha}...{sha}"
+                        cmp_resp = await client.get(compare_url, headers=headers)
+                        if cmp_resp.status_code == 200:
+                            cmp_data = cmp_resp.json()
+                            commits_list = cmp_data.get("commits", [])
+                    except Exception as cmp_err:
+                        LOGGER.debug(f"Failed to fetch compare commits: {cmp_err}")
+
+                summary = humanize_changelog(full_message, commits_list)
 
                 remote_info = VersionInfo(
                     sha=sha,
@@ -140,9 +289,9 @@ class UpdateService:
                     message=message,
                     author=author,
                     date=date,
+                    changelog_summary=summary,
                 )
 
-                local_info = self.get_local_version()
                 if local_info is None:
                     # No local version info -> suggest update
                     return True, remote_info, None

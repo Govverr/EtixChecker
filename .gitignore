@@ -33,6 +33,7 @@ report.csv
 data/*.csv
 !data/shows.csv.example
 data/good_proxies.txt
+data/slow_proxies.txt
 data/bad_proxies.txt
 data/blocked_profiles.txt
 data/*.json

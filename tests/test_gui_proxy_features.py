@@ -322,6 +322,120 @@ class TestGuiProxyFeatures(unittest.TestCase):
             is_blk3 = asyncio.run(detector.is_blocked_page(page3))
             self.assertFalse(is_blk3, "Solvable slider must NOT be classified as hard block")
 
+    def test_humanize_changelog_and_translation(self):
+        """Verify _translate_commit_line and humanize_changelog translate technical messages into friendly Russian."""
+        from src.utils.updater import _translate_commit_line, humanize_changelog
+
+        # 1. Commit line translation
+        line1 = "fix(datadome): fast-swap hard-blocked datadome pages"
+        trans1 = _translate_commit_line(line1)
+        self.assertIn("Защита DataDome", trans1)
+        self.assertIn("замена страниц", trans1.lower())
+
+        line2 = "feat(proxy): add toggle switch for auto proxy hot-swap"
+        trans2 = _translate_commit_line(line2)
+        self.assertIn("Прокси", trans2)
+        self.assertIn("переключатель", trans2.lower())
+
+        # 2. Raw message translation with humanize_changelog
+        raw_msg = (
+            "fix(datadome): fast-swap hard-blocked datadome pages\n"
+            "feat(gui): make top dashboard cards compact\n"
+            "Signed-off-by: Developer <dev@example.com>\n"
+        )
+        res = humanize_changelog(raw_msg)
+        self.assertIn("•", res)
+        self.assertIn("Защита DataDome", res)
+        self.assertNotIn("Signed-off-by", res)
+
+        # 3. GitHub compare API commits list
+        commits_data = [
+            {"commit": {"message": "feat(proxy): add toggle switch for auto proxy hot-swap on adspower profiles"}},
+            {"commit": {"message": "fix: prevent session report erasure on check finish"}},
+        ]
+        res_commits = humanize_changelog("fallback", commits=commits_data)
+        self.assertIn("переключатель автоматической замены прокси", res_commits.lower())
+        self.assertIn("сохранение списка заблокированных профилей", res_commits.lower())
+
+    def test_proxy_swap_toggle_switch_logic(self):
+        """Verify proxy swap toggle switch updates state labels, global config, and calls save_delays_to_dotenv."""
+        import os
+        from src.config.settings import CONFIG
+
+        app = EtixGuiApp.__new__(EtixGuiApp)
+        app.lbl_proxy_swap_state = MagicMock()
+        app._var_proxy_swap = MagicMock()
+        app._log = MagicMock()
+
+        # Test UI label update
+        app._update_proxy_swap_ui(True)
+        app.lbl_proxy_swap_state.configure.assert_called_with(
+            text="[ВКЛ: замена в профиле]",
+            text_color="#34d399",
+        )
+
+        app._update_proxy_swap_ui(False)
+        app.lbl_proxy_swap_state.configure.assert_called_with(
+            text="[ВЫКЛ: смена профиля]",
+            text_color="#fbbf24",
+        )
+
+        # Test toggle handler when switching to False
+        app._var_proxy_swap.get.return_value = False
+        with patch("gui_app.save_delays_to_dotenv") as mock_save_dotenv:
+            app._on_auto_proxy_swap_toggled()
+            mock_save_dotenv.assert_called_with({"AUTO_SWAP_PROFILE_PROXY": "false"})
+            self.assertEqual(os.environ.get("AUTO_SWAP_PROFILE_PROXY"), "false")
+            import gui_app
+            self.assertFalse(gui_app.CONFIG.auto_swap_profile_proxy)
+
+        # Test toggle handler when switching to True
+        app._var_proxy_swap.get.return_value = True
+        with patch("gui_app.save_delays_to_dotenv") as mock_save_dotenv:
+            app._on_auto_proxy_swap_toggled()
+            mock_save_dotenv.assert_called_with({"AUTO_SWAP_PROFILE_PROXY": "true"})
+            self.assertEqual(os.environ.get("AUTO_SWAP_PROFILE_PROXY"), "true")
+            import gui_app
+            self.assertTrue(gui_app.CONFIG.auto_swap_profile_proxy)
+
+    def test_cdp_pool_replace_worker_respects_auto_swap_disabled(self):
+        """Verify CDPBrowserPool calls _replace_worker_with_reserve_unlocked when auto_swap_profile_proxy is False."""
+        import asyncio
+        from unittest.mock import AsyncMock
+        from src.browser.cdp_pool import CDPBrowserPool
+        from src.config.settings import AppConfig
+
+        # Case 1: auto_swap_profile_proxy = False -> Should use Level 2 Cascade directly
+        cfg_disabled = AppConfig(auto_swap_profile_proxy=False)
+        pool_disabled = CDPBrowserPool.__new__(CDPBrowserPool)
+        pool_disabled.config = cfg_disabled
+        pool_disabled._lock = asyncio.Lock()
+        pool_disabled.in_place_proxy_swap = AsyncMock()
+
+        mock_worker = MagicMock()
+        mock_worker.worker_index = 1
+        mock_worker.profile = MagicMock(name="TestProfile", user_id="u123")
+
+        with patch.object(pool_disabled, "_replace_worker_with_reserve_unlocked", new_callable=AsyncMock) as mock_legacy_swap:
+            mock_legacy_swap.return_value = mock_worker
+            res = asyncio.run(pool_disabled.replace_worker_with_reserve(mock_worker, reason="test"))
+            self.assertEqual(res, mock_worker)
+            mock_legacy_swap.assert_called_once_with(mock_worker, reason="test", max_attempts=None)
+            pool_disabled.in_place_proxy_swap.assert_not_called()
+
+        # Case 2: auto_swap_profile_proxy = True -> Should call in_place_proxy_swap
+        cfg_enabled = AppConfig(auto_swap_profile_proxy=True)
+        pool_enabled = CDPBrowserPool.__new__(CDPBrowserPool)
+        pool_enabled.config = cfg_enabled
+        pool_enabled._lock = asyncio.Lock()
+        pool_enabled.in_place_proxy_swap = AsyncMock(return_value=mock_worker)
+
+        with patch.object(pool_enabled, "_replace_worker_with_reserve_unlocked", new_callable=AsyncMock) as mock_legacy_swap:
+            res = asyncio.run(pool_enabled.replace_worker_with_reserve(mock_worker, reason="test"))
+            self.assertEqual(res, mock_worker)
+            pool_enabled.in_place_proxy_swap.assert_called_once_with(mock_worker, reason="test")
+            mock_legacy_swap.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
