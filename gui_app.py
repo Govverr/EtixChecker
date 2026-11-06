@@ -1398,21 +1398,21 @@ class EtixGuiApp(ctk.CTk):
         subtitle: str,
         initial_value: str = "0",
     ) -> ctk.CTkFrame:
-        """Create a premium styled SaaS metric card for proxy pools with vivid badge and subtitles."""
+        """Create a compact modern styled SaaS metric card for proxy pools with vivid badge and subtitle."""
         card = ctk.CTkFrame(
             parent,
             fg_color="#121829",
             border_color=border_color,
             border_width=1,
-            corner_radius=12,
+            corner_radius=8,
+            width=165,
+            height=68,
         )
-
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=14, pady=12)
+        card.pack_propagate(False)
 
         # Top row: icon badge + category title
-        top_row = ctk.CTkFrame(inner, fg_color="transparent")
-        top_row.pack(fill="x", anchor="w")
+        top_row = ctk.CTkFrame(card, fg_color="transparent")
+        top_row.pack(fill="x", padx=10, pady=(6, 1))
 
         # Color badge container
         badge = ctk.CTkFrame(
@@ -1420,17 +1420,17 @@ class EtixGuiApp(ctk.CTk):
             fg_color=badge_bg,
             border_color=border_color,
             border_width=1,
-            corner_radius=6,
-            width=28,
-            height=28,
+            corner_radius=4,
+            width=20,
+            height=20,
         )
-        badge.pack(side="left", padx=(0, 8))
+        badge.pack(side="left", padx=(0, 6))
         badge.pack_propagate(False)
 
         lbl_icon = ctk.CTkLabel(
             badge,
             text=badge_symbol,
-            font=ctk.CTkFont(family="Segoe UI Emoji", size=13, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=10, weight="bold"),
             text_color=badge_fg,
         )
         lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
@@ -1438,29 +1438,29 @@ class EtixGuiApp(ctk.CTk):
         lbl_title = ctk.CTkLabel(
             top_row,
             text=title,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#f8fafc",
         )
         lbl_title.pack(side="left")
 
-        # Value row: large prominent number
+        # Value row: prominent number
         lbl_v = ctk.CTkLabel(
-            inner,
+            card,
             text=initial_value,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=17, weight="bold"),
             text_color=badge_fg,
         )
-        lbl_v.pack(anchor="w", pady=(8, 2))
+        lbl_v.pack(anchor="w", padx=10, pady=(0, 1))
         card.lbl_val = lbl_v
 
         # Subtitle / Criteria row
         lbl_sub = ctk.CTkLabel(
-            inner,
+            card,
             text=subtitle,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#94a3b8",
         )
-        lbl_sub.pack(anchor="w")
+        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
 
         return card
 
@@ -1847,7 +1847,7 @@ class EtixGuiApp(ctk.CTk):
             subtitle="Пинг < 1.5 с • 1-й приоритет",
             initial_value="0",
         )
-        self.stat_proxy_good.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        self.stat_proxy_good.pack(side="left", padx=(0, 6))
 
         self.stat_proxy_slow = self._create_proxy_stat_card(
             self.proxy_stats_bar,
@@ -1859,7 +1859,7 @@ class EtixGuiApp(ctk.CTk):
             subtitle="1.5–2.5 с • Авто-резерв",
             initial_value="0",
         )
-        self.stat_proxy_slow.pack(side="left", fill="both", expand=True, padx=6)
+        self.stat_proxy_slow.pack(side="left", padx=6)
 
         self.stat_proxy_bad = self._create_proxy_stat_card(
             self.proxy_stats_bar,
@@ -1871,7 +1871,7 @@ class EtixGuiApp(ctk.CTk):
             subtitle="Таймаут / Бан DataDome",
             initial_value="0",
         )
-        self.stat_proxy_bad.pack(side="left", fill="both", expand=True, padx=6)
+        self.stat_proxy_bad.pack(side="left", padx=6)
 
         self.stat_proxy_in_use = self._create_proxy_stat_card(
             self.proxy_stats_bar,
@@ -1883,7 +1883,7 @@ class EtixGuiApp(ctk.CTk):
             subtitle="Занято профилями сейчас",
             initial_value="0",
         )
-        self.stat_proxy_in_use.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        self.stat_proxy_in_use.pack(side="left", padx=6)
 
         # 2. Action Toolbar for Proxies (strictly inside tab_proxies)
         self.proxy_actions_bar = ctk.CTkFrame(self.tab_proxies, fg_color="transparent")
