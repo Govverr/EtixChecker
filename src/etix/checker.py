@@ -201,6 +201,9 @@ class EtixCheckEngine:
                 f"Пожалуйста, закройте открытые профили в AdsPower или добавьте новые свободные профили в группу."
             )
 
+        # Reset session blocked profiles for this run cycle before pool initialization
+        self.profile_manager.clear_session_blocked_profiles()
+
         # Initialize CDP Browser Pool with only needed profiles
         self.cdp_pool = CDPBrowserPool(
             config=self.config,
@@ -221,9 +224,6 @@ class EtixCheckEngine:
                 f"Пул инициализирован частично: {len(workers)}/{profiles_count_to_start} рабочих воркеров. "
                 f"Продолжаем проверку доступным составом воркеров."
             )
-
-        # Reset session blocked profiles for this run cycle
-        self.profile_manager.clear_session_blocked_profiles()
 
         # Setup RunContext / Checkpoint
         checkpoint_path = RunContext.find_last_active_checkpoint(self.config.runs_dir)
@@ -895,7 +895,42 @@ class EtixCheckEngine:
                         await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Bad proxy and swaps exhausted")
                     return None
 
-                # 4. FAST-PATH Pre-check: DataDome Slider & Hard Block
+                # 4. FAST-PATH Pre-check: Immediate DataDome Hard Block & Bad Verdict
+                v_verdict, v_rt = await self.detector.get_datadome_verdict(current_worker.page)
+                if v_verdict == "bv" or await self.detector.is_blocked_page(current_worker.page):
+                    LOGGER.warning(
+                        f"[Worker #{current_worker.worker_index}] Profile '{current_worker.profile.name}' (ID: {current_worker.profile.user_id}) "
+                        f"is HARD-BLOCKED by DataDome (verdict='{v_verdict or 'bv'}'). Fast-swapping immediately without reload..."
+                    )
+                    if self.cdp_pool:
+                        self.cdp_pool.record_hard_verdict_bv()
+                    await self.reporter.save_dom_dump(
+                        current_worker.page, show.name, prefix="hard_block_bv",
+                        reason=f"DataDome Hard Block (verdict={v_verdict or 'bv'})"
+                    )
+                    await self.reporter.save_screenshot(current_worker.page, show.name, prefix="hard_block_bv")
+                    await deep_storage_wipe(current_worker.page)
+                    self.profile_manager.record_blocked_profile(
+                        current_worker.profile, f"DataDome: Hard Block (verdict={v_verdict or 'bv'})"
+                    )
+                    if current_worker.profile.proxy_key:
+                        self.profile_manager.record_bad_proxy(
+                            current_worker.profile.proxy_key, "DataDome Blocked"
+                        )
+                    if swaps_done < max_profile_swaps and self.cdp_pool:
+                        new_w = await self.cdp_pool.replace_worker_with_reserve(
+                            current_worker, reason="DataDome Hard Block"
+                        )
+                        if new_w:
+                            current_worker = new_w
+                            swaps_done += 1
+                            continue
+                    if self.cdp_pool:
+                        await self.cdp_pool.stop_and_remove_worker(
+                            current_worker, reason="DataDome Hard Block"
+                        )
+                    return None
+
                 # Support multi-round consecutive sliders (e.g. 2 in a row or post-reload challenge)
                 max_consecutive_rounds = 3
                 round_num = 0
@@ -1446,6 +1481,9 @@ class EtixCheckEngine:
                         await self.reporter.save_screenshot(current_worker.page, show.name, prefix="readiness_failed")
                     except Exception:
                         pass
+                    self.profile_manager.record_blocked_profile(
+                        current_worker.profile, reason="Страница события не отвечает / элементы отсутствуют"
+                    )
                     await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Readiness confirmation failed")
                 return None
 

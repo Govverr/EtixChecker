@@ -243,6 +243,85 @@ class TestGuiProxyFeatures(unittest.TestCase):
         self.assertIn("ID: new1", content)
         self.assertNotIn("Old", content)
 
+        # Crucial test: reset_session_statuses at the END of a check must NOT erase blocked profiles
+        pm.reset_session_statuses()
+        self.assertEqual(len(pm.get_session_blocked_profiles()), 1)
+        content_after_reset = blocked_file.read_text(encoding="utf-8")
+        self.assertIn("ID: new1", content_after_reset)
+
+    def test_detector_is_blocked_page_detects_all_datadome_hard_blocks(self):
+        """Verify is_blocked_page correctly identifies DataDome hard blocks (verdict=bv, iframe text, dd script)."""
+        import asyncio
+        from src.config.settings import AppConfig
+        from src.etix.detector import EtixDetector
+
+        cfg = AppConfig()
+        detector = EtixDetector(config=cfg)
+
+        class AsyncMockLoc:
+            def __init__(self, visible=False):
+                self._visible = visible
+            def first(self):
+                return self
+            async def is_visible(self, timeout=None):
+                return self._visible
+
+        class AsyncMockFrame:
+            def __init__(self, url="", body=""):
+                self.url = url
+                self._body = body
+            def locator(self, *args, **kwargs):
+                has_hdr = "Access Temporarily Blocked" in self._body
+                return AsyncMockLoc(visible=has_hdr)
+            async def inner_text(self, selector, timeout=None):
+                return self._body
+            async def evaluate(self, script):
+                return None
+
+        class AsyncMockPage:
+            def __init__(self, frames, content="", title="etix.com"):
+                self.frames = frames
+                self._content = content
+                self._title = title
+            async def title(self):
+                return self._title
+            async def content(self):
+                return self._content
+            def locator(self, selector):
+                is_vis = ("t=bv" in selector and "t=bv" in self._content)
+                return AsyncMockLoc(visible=is_vis)
+
+        # Case 1: geo.captcha-delivery.com frame has "Access Temporarily Blocked"
+        frame_dd = AsyncMockFrame(
+            url="https://geo.captcha-delivery.com/captcha/?initialCid=123&t=bv",
+            body="Access Temporarily Blocked\nTo help protect our platform from automated traffic, our security systems have temporarily restricted access to this page."
+        )
+        page1 = AsyncMockPage(frames=[frame_dd], content="<html><iframe src='https://geo.captcha-delivery.com/captcha/?t=bv'></iframe></html>")
+
+        is_blk = asyncio.run(detector.is_blocked_page(page1))
+        self.assertTrue(is_blk, "Should detect DataDome hard block inside captcha-delivery iframe")
+
+        # Case 2: DataDome script tag with t: 'bv' in main page content
+        page2 = AsyncMockPage(
+            frames=[],
+            content="<script>var dd={'rt':'c','cid':'123','t':'bv','host':'geo.captcha-delivery.com'}</script>"
+        )
+        is_blk2 = asyncio.run(detector.is_blocked_page(page2))
+        self.assertTrue(is_blk2, "Should detect DataDome hard block with verdict bv in page content")
+
+        # Case 3: Solvable slider challenge (t: 'fe') - should NOT be treated as a hard block
+        frame_slider = AsyncMockFrame(
+            url="https://geo.captcha-delivery.com/captcha/?initialCid=123&t=fe",
+            body="Slide right to secure your access"
+        )
+        page3 = AsyncMockPage(
+            frames=[frame_slider],
+            content="<script>var dd={'rt':'c','cid':'123','t':'fe'}</script>"
+        )
+        with patch.object(detector, "is_slider_captcha", return_value=True):
+            is_blk3 = asyncio.run(detector.is_blocked_page(page3))
+            self.assertFalse(is_blk3, "Solvable slider must NOT be classified as hard block")
+
 
 if __name__ == "__main__":
     unittest.main()

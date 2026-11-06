@@ -323,6 +323,34 @@ class EtixDetector:
         except Exception:
             pass
 
+        # 1. Immediate Hard Block / Bad Verdict (bv) check via DataDome verdict
+        try:
+            v_verdict, _ = await self.get_datadome_verdict(page)
+            if v_verdict == "bv":
+                return True
+        except Exception:
+            pass
+
+        # 2. Check for explicit DataDome block iframe or attributes in DOM (e.g. t=bv or title='DataDome CAPTCHA')
+        try:
+            cpt_iframe = page.locator(
+                "iframe[src*='captcha-delivery.com'][src*='t=bv'], "
+                "iframe[src*='t=bv'], "
+                "iframe[title*='DataDome'][src*='t=bv']"
+            ).first
+            if await cpt_iframe.is_visible(timeout=100):
+                return True
+        except Exception:
+            pass
+
+        # 3. Check page script/content for var dd with t: 'bv'
+        try:
+            content = await page.content()
+            if "var dd" in content and re.search(r"['\"]?t['\"]?\s*:\s*['\"]bv['\"]", content):
+                return True
+        except Exception:
+            pass
+
 
         try:
             # Check page title first (strict check - avoid matching generic words)
@@ -351,8 +379,16 @@ class EtixDetector:
         for frame in page.frames:
             try:
                 f_url = (frame.url or "").lower()
-                if "captcha-delivery.com" in f_url or "datadome.co" in f_url:
-                    continue
+                # Fast selector check inside child frame
+                f_hdr = frame.locator(
+                    "h1:has-text('Access Temporarily Blocked'), h2:has-text('Access Temporarily Blocked'), "
+                    "p:has-text('Access Temporarily Blocked'), title:has-text('Access Temporarily Blocked'), "
+                    "text='Access Temporarily Blocked', "
+                    "text=/To help protect our platform from automated traffic/i, "
+                    "text=/our security systems have temporarily restricted access/i"
+                ).first
+                if await f_hdr.is_visible(timeout=100):
+                    return True
                 body_text = await frame.inner_text("body", timeout=400)
                 for pattern in self.config.blocked_text_patterns:
                     if re.search(pattern, body_text, flags=re.I):
@@ -368,6 +404,14 @@ class EtixDetector:
         Returns False if the slider was already solved (.slider-success / .captcha-success)
         or if no interactive slider handle/container is currently active.
         """
+        # If DataDome issued bad verdict (bv), it is a hard block, not an interactive challenge
+        try:
+            v_verdict, _ = await self.get_datadome_verdict(page)
+            if v_verdict == "bv":
+                return False
+        except Exception:
+            pass
+
         # 0. Early exit: If challenge was already solved, it is NOT an active challenge!
         try:
             for frame in page.frames:

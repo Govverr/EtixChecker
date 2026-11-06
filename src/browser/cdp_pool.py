@@ -650,6 +650,10 @@ class CDPBrowserPool:
                 pass
             worker.profile.is_open = False
             self.profile_manager.mark_profile_failed(worker.profile)
+            if self.profile_manager:
+                self.profile_manager.record_blocked_profile(
+                    worker.profile, reason=reason or "Worker stopped / readiness failed"
+                )
             if self.proxy_manager and worker.profile.proxy_key and hasattr(self.proxy_manager, "release_proxy"):
                 self.proxy_manager.release_proxy(worker.profile.proxy_key)
             if worker in self.workers:

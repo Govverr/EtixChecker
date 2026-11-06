@@ -2169,6 +2169,7 @@ class EtixGuiApp(ctk.CTk):
         self.current_group_name = selected_group
 
         # Pre-flight Concurrency & Profile Sufficiency Check
+        self.profile_manager.clear_session_blocked_profiles()
         self.profile_manager.reset_session_statuses()
         self._update_blocked_badge()
         free_profiles = self.profile_manager.get_available_free_profiles()
@@ -2847,7 +2848,19 @@ class EtixGuiApp(ctk.CTk):
                     self._update_blocked_badge()
                     err = msg[1]
                     self._log(f"❌ Ошибка: {err}")
-                    messagebox.showerror("Ошибка проверки", err)
+
+                    blocked = self.profile_manager.get_session_blocked_profiles()
+                    if blocked:
+                        self._log("⚠️ =========================================")
+                        self._log(f"⚠️ ВНИМАНИЕ: Во время проверки были заблокированы {len(blocked)} профилей:")
+                        for bp in blocked:
+                            info = f"• {bp['name']} (ID: {bp['user_id']}) | Прокси: {bp.get('proxy', 'N/A')}"
+                            self._log(f"   🚫 {info} — {bp.get('reason', 'Заблокирован')}")
+                        self._log("📝 Список заблокированных профилей сохранен в 'data/blocked_profiles.txt'.")
+                        self._log("⚠️ =========================================")
+                        self._show_blocked_profiles_modal()
+                    else:
+                        messagebox.showerror("Ошибка проверки", err)
 
         except queue.Empty:
             pass

@@ -302,7 +302,6 @@ class AdsPowerProfileManager:
                 p.is_open = False
                 reset_count += 1
 
-        self.clear_session_blocked_profiles()
         self._session_bad_proxies.clear()
         LOGGER.info(f"Reset {reset_count} profiles to RESERVE state for clean check cycle.")
 
