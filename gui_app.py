@@ -745,7 +745,7 @@ class EtixGuiApp(ctk.CTk):
         self.stat_proxies = self._create_metric_chip(self.stats_bar, "🌐 Пул прокси", "Good: 0 | Slow: 0")
         self.stat_proxies.pack(side="left", padx=8)
 
-        # 3. Action Toolbar (Styled Buttons)
+        # 3. Action Toolbar (Variant 1: Clean Toolbar + Tools Dropdown Menu)
         self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.btn_frame.pack(fill="x", padx=20, pady=(0, 12))
 
@@ -763,10 +763,7 @@ class EtixGuiApp(ctk.CTk):
         )
         self.btn_start.pack(side="left", padx=(0, 8))
 
-        # Secondary Action Buttons
-        self.btn_backup = self._create_action_btn("💾  Бэкап профилей", self._on_backup_clicked)
-        self.btn_backup.pack(side="left", padx=6)
-
+        # Core Data & Results Buttons
         self.btn_shows = self._create_action_btn("📄  shows.csv", lambda: self._open_file(CONFIG.shows_csv))
         self.btn_shows.pack(side="left", padx=6)
 
@@ -776,17 +773,54 @@ class EtixGuiApp(ctk.CTk):
         self.btn_blocked = self._create_action_btn("🚫  Заблокированные (0)", self._show_blocked_profiles_modal)
         self.btn_blocked.pack(side="left", padx=6)
 
-        self.btn_logs = self._create_action_btn("📁  Логи", lambda: self._open_folder(CONFIG.logs_dir))
-        self.btn_logs.pack(side="left", padx=6)
+        # Tools Dropdown Menu (Right aligned)
+        self.combo_tools = ctk.CTkOptionMenu(
+            self.btn_frame,
+            values=[
+                "💾  Бэкап профилей AdsPower",
+                "📁  Открыть папку с логами",
+                "📦  Собрать ZIP-архив логов",
+                "🔄  Проверить обновления",
+                "⏪  Откатить версию программы",
+            ],
+            command=self._on_tool_selected,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            dropdown_font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            fg_color=COLOR_BTN_SEC,
+            button_color=COLOR_BTN_SEC_BORDER,
+            button_hover_color=COLOR_BTN_SEC_HOVER,
+            text_color=COLOR_TEXT_PRIMARY,
+            dropdown_fg_color="#121829",
+            dropdown_hover_color="#1e293b",
+            dropdown_text_color="#f8fafc",
+            height=38,
+            width=210,
+            corner_radius=8,
+        )
+        self.combo_tools.set("⚙️  Инструменты ▾")
+        self.combo_tools.pack(side="right", padx=(6, 0))
 
-        self.btn_collect_logs = self._create_action_btn("📦  Собрать логи", self._on_collect_logs_clicked)
-        self.btn_collect_logs.pack(side="left", padx=6)
+        # Proxy wrappers for background thread state/text configuration
+        class _ToolBtnProxy:
+            def __init__(self, combo: ctk.CTkOptionMenu):
+                self._combo = combo
+            def configure(self, state: Optional[str] = None, text: Optional[str] = None, **kwargs):
+                if text and ("..." in text or "⏳" in text or "Завершено" in text):
+                    try:
+                        self._combo.set(text)
+                    except Exception:
+                        pass
+                elif state == "normal":
+                    try:
+                        self._combo.set("⚙️  Инструменты ▾")
+                    except Exception:
+                        pass
 
-        self.btn_updates = self._create_action_btn("🔄  Проверить обновления", self._on_check_updates_clicked)
-        self.btn_updates.pack(side="left", padx=6)
-
-        self.btn_rollback = self._create_action_btn("⏪  Откатить версию", self._on_rollback_clicked)
-        self.btn_rollback.pack(side="left", padx=6)
+        self.btn_backup = _ToolBtnProxy(self.combo_tools)
+        self.btn_logs = _ToolBtnProxy(self.combo_tools)
+        self.btn_collect_logs = _ToolBtnProxy(self.combo_tools)
+        self.btn_updates = _ToolBtnProxy(self.combo_tools)
+        self.btn_rollback = _ToolBtnProxy(self.combo_tools)
 
         # 4. Main Content Card with Tabs (Dashboard Cards vs Live Logs)
         self.main_card = ctk.CTkFrame(
@@ -1334,10 +1368,13 @@ class EtixGuiApp(ctk.CTk):
         chip.lbl_val = lbl_v
         return chip
 
-    def _create_action_btn(self, text: str, command) -> ctk.CTkButton:
+    def _create_action_btn(
+        self, text: str, command, parent: Optional[Any] = None, height: int = 38
+    ) -> ctk.CTkButton:
         """Create a styled secondary action button."""
+        p = parent if parent is not None else self.btn_frame
         return ctk.CTkButton(
-            self.btn_frame,
+            p,
             text=text,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             fg_color=COLOR_BTN_SEC,
@@ -1345,10 +1382,87 @@ class EtixGuiApp(ctk.CTk):
             border_color=COLOR_BTN_SEC_BORDER,
             border_width=1,
             text_color=COLOR_TEXT_PRIMARY,
-            height=38,
+            height=height,
             corner_radius=8,
             command=command,
         )
+
+    def _create_proxy_stat_card(
+        self,
+        parent: ctk.CTkFrame,
+        badge_symbol: str,
+        badge_bg: str,
+        badge_fg: str,
+        border_color: str,
+        title: str,
+        subtitle: str,
+        initial_value: str = "0",
+    ) -> ctk.CTkFrame:
+        """Create a premium styled SaaS metric card for proxy pools with vivid badge and subtitles."""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#121829",
+            border_color=border_color,
+            border_width=1,
+            corner_radius=12,
+        )
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=14, pady=12)
+
+        # Top row: icon badge + category title
+        top_row = ctk.CTkFrame(inner, fg_color="transparent")
+        top_row.pack(fill="x", anchor="w")
+
+        # Color badge container
+        badge = ctk.CTkFrame(
+            top_row,
+            fg_color=badge_bg,
+            border_color=border_color,
+            border_width=1,
+            corner_radius=6,
+            width=28,
+            height=28,
+        )
+        badge.pack(side="left", padx=(0, 8))
+        badge.pack_propagate(False)
+
+        lbl_icon = ctk.CTkLabel(
+            badge,
+            text=badge_symbol,
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=13, weight="bold"),
+            text_color=badge_fg,
+        )
+        lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
+
+        lbl_title = ctk.CTkLabel(
+            top_row,
+            text=title,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#f8fafc",
+        )
+        lbl_title.pack(side="left")
+
+        # Value row: large prominent number
+        lbl_v = ctk.CTkLabel(
+            inner,
+            text=initial_value,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            text_color=badge_fg,
+        )
+        lbl_v.pack(anchor="w", pady=(8, 2))
+        card.lbl_val = lbl_v
+
+        # Subtitle / Criteria row
+        lbl_sub = ctk.CTkLabel(
+            inner,
+            text=subtitle,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color="#94a3b8",
+        )
+        lbl_sub.pack(anchor="w")
+
+        return card
 
     def _load_shows_preview(self) -> None:
         """Load shows from shows.csv and generate cards, preserving selection state."""
@@ -1691,6 +1805,23 @@ class EtixGuiApp(ctk.CTk):
                 text_color=COLOR_TEXT_MUTED,
             )
 
+    def _on_tool_selected(self, choice: str) -> None:
+        """Handle selection from the Tools dropdown menu."""
+        if not choice:
+            return
+        self.combo_tools.set("⚙️  Инструменты ▾")
+
+        if "Бэкап" in choice:
+            self._on_backup_clicked()
+        elif "папку с логами" in choice:
+            self._open_folder(CONFIG.logs_dir)
+        elif "Собрать ZIP-архив" in choice:
+            self._on_collect_logs_clicked()
+        elif "обновления" in choice:
+            self._on_check_updates_clicked()
+        elif "Откатить" in choice:
+            self._on_rollback_clicked()
+
     def _show_blocked_profiles_modal(self) -> None:
         """Display modern modal dialog with blocked profiles and 1-click copy."""
         modal = BlockedProfilesModal(
@@ -1702,23 +1833,59 @@ class EtixGuiApp(ctk.CTk):
 
     def _build_proxies_tab(self) -> None:
         """Build the Proxy Management tab with Pre-flight checker and pool inspection."""
-        # 1. Top Metric Chips for Proxies
+        # 1. Top Metric Cards for Proxies (SaaS Style with vivid badges & subtitles)
         self.proxy_stats_bar = ctk.CTkFrame(self.tab_proxies, fg_color="transparent")
-        self.proxy_stats_bar.pack(fill="x", padx=6, pady=(6, 10))
+        self.proxy_stats_bar.pack(fill="x", padx=6, pady=(6, 12))
 
-        self.stat_proxy_good = self._create_metric_chip(self.proxy_stats_bar, "✅ Быстрые (Good)", "0")
-        self.stat_proxy_good.pack(side="left", padx=(0, 6))
+        self.stat_proxy_good = self._create_proxy_stat_card(
+            self.proxy_stats_bar,
+            badge_symbol="⚡",
+            badge_bg="#064e3b",
+            badge_fg="#34d399",
+            border_color="#059669",
+            title="Быстрые (Good)",
+            subtitle="Пинг < 1.5 с • 1-й приоритет",
+            initial_value="0",
+        )
+        self.stat_proxy_good.pack(side="left", fill="both", expand=True, padx=(0, 6))
 
-        self.stat_proxy_slow = self._create_metric_chip(self.proxy_stats_bar, "⚠️ Резерв (Slow)", "0")
-        self.stat_proxy_slow.pack(side="left", padx=6)
+        self.stat_proxy_slow = self._create_proxy_stat_card(
+            self.proxy_stats_bar,
+            badge_symbol="⏳",
+            badge_bg="#451a03",
+            badge_fg="#fbbf24",
+            border_color="#d97706",
+            title="Резервные (Slow)",
+            subtitle="1.5–2.5 с • Авто-резерв",
+            initial_value="0",
+        )
+        self.stat_proxy_slow.pack(side="left", fill="both", expand=True, padx=6)
 
-        self.stat_proxy_bad = self._create_metric_chip(self.proxy_stats_bar, "❌ Нерабочие (Bad)", "0")
-        self.stat_proxy_bad.pack(side="left", padx=6)
+        self.stat_proxy_bad = self._create_proxy_stat_card(
+            self.proxy_stats_bar,
+            badge_symbol="🚫",
+            badge_bg="#450a0a",
+            badge_fg="#f87171",
+            border_color="#dc2626",
+            title="Нерабочие (Bad)",
+            subtitle="Таймаут / Бан DataDome",
+            initial_value="0",
+        )
+        self.stat_proxy_bad.pack(side="left", fill="both", expand=True, padx=6)
 
-        self.stat_proxy_in_use = self._create_metric_chip(self.proxy_stats_bar, "🔒 В работе (In-Use)", "0")
-        self.stat_proxy_in_use.pack(side="left", padx=6)
+        self.stat_proxy_in_use = self._create_proxy_stat_card(
+            self.proxy_stats_bar,
+            badge_symbol="🔒",
+            badge_bg="#1e1b4b",
+            badge_fg="#818cf8",
+            border_color="#4f46e5",
+            title="В работе (In-Use)",
+            subtitle="Занято профилями сейчас",
+            initial_value="0",
+        )
+        self.stat_proxy_in_use.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
-        # 2. Action Toolbar for Proxies
+        # 2. Action Toolbar for Proxies (strictly inside tab_proxies)
         self.proxy_actions_bar = ctk.CTkFrame(self.tab_proxies, fg_color="transparent")
         self.proxy_actions_bar.pack(fill="x", padx=6, pady=(0, 10))
 
@@ -1728,8 +1895,8 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             fg_color=COLOR_BTN_PRIMARY,
             hover_color=COLOR_BTN_PRIMARY_HOVER,
-            height=32,
-            corner_radius=6,
+            height=34,
+            corner_radius=8,
             command=self._on_load_proxy_file_clicked,
         )
         self.btn_load_proxy_file.pack(side="left", padx=(0, 6))
@@ -1740,19 +1907,25 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             fg_color="#065f46",
             hover_color="#047857",
-            height=32,
-            corner_radius=6,
+            height=34,
+            corner_radius=8,
             command=self._on_run_preflight_clicked,
         )
         self.btn_preflight.pack(side="left", padx=6)
 
-        self.btn_paste_proxy = self._create_action_btn("📋  Вставить из буфера", self._on_paste_proxies_clicked)
+        self.btn_paste_proxy = self._create_action_btn(
+            "📋  Вставить из буфера", self._on_paste_proxies_clicked, parent=self.proxy_actions_bar, height=34
+        )
         self.btn_paste_proxy.pack(side="left", padx=6)
 
-        self.btn_open_data_folder = self._create_action_btn("📁  Папка data/", lambda: self._open_folder(Path("data")))
+        self.btn_open_data_folder = self._create_action_btn(
+            "📁  Папка data/", lambda: self._open_folder(Path("data")), parent=self.proxy_actions_bar, height=34
+        )
         self.btn_open_data_folder.pack(side="left", padx=6)
 
-        self.btn_refresh_proxies = self._create_action_btn("🔄  Обновить списки", self._refresh_proxy_tab_data)
+        self.btn_refresh_proxies = self._create_action_btn(
+            "🔄  Обновить списки", self._refresh_proxy_tab_data, parent=self.proxy_actions_bar, height=34
+        )
         self.btn_refresh_proxies.pack(side="left", padx=6)
 
         # 3. Pre-flight Progress Panel (hidden by default)
