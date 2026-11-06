@@ -110,6 +110,57 @@ class TestGuiProxyFeatures(unittest.TestCase):
                 text_color="#f87171",
             )
 
+    @patch("gui_app.ctk.CTkProgressBar")
+    @patch("gui_app.ctk.CTkFont")
+    @patch("gui_app.ctk.CTkLabel")
+    @patch("gui_app.ctk.CTkFrame")
+    def test_modern_dashboard_cards_proxies_and_formatting(
+        self, mock_frame_cls, mock_label_cls, mock_font_cls, mock_progress_cls
+    ):
+        """Verify modern dashboard cards format values and updates matching mockup."""
+        mock_label_cls.side_effect = lambda *args, **kwargs: MagicMock()
+        mock_frame_cls.side_effect = lambda *args, **kwargs: MagicMock()
+        mock_progress_cls.side_effect = lambda *args, **kwargs: MagicMock()
+        app = EtixGuiApp.__new__(EtixGuiApp)
+        parent_mock = MagicMock()
+
+        # 1. Events card
+        card_events = app._create_events_card(parent_mock)
+        self.assertTrue(hasattr(card_events, "lbl_val"))
+        card_events.lbl_val.configure(text="2 из 2")
+        # proxy internal checks
+        self.assertEqual(card_events.lbl_val._num.configure.call_args_list[-1][1]["text"], "2")
+        self.assertEqual(card_events.lbl_val._suf.configure.call_args_list[-1][1]["text"], " / 2 Active")
+        self.assertEqual(card_events.lbl_val._pill.configure.call_args_list[-1][1]["text"], "100% loaded")
+
+        # 2. Tickets card
+        card_tickets = app._create_tickets_card(parent_mock)
+        self.assertTrue(hasattr(card_tickets, "lbl_val"))
+        card_tickets.lbl_val.configure(text="12 / 48")
+        self.assertEqual(card_tickets.lbl_val._val.configure.call_args_list[-1][1]["text"], "12 / 48")
+        card_tickets.lbl_val._bar.set.assert_called_with(12 / 48)
+        self.assertEqual(card_tickets.lbl_val._pct.configure.call_args_list[-1][1]["text"], "25%")
+
+        # 3. Workers card
+        card_workers = app._create_workers_card(parent_mock)
+        self.assertTrue(hasattr(card_workers, "lbl_val"))
+        card_workers.lbl_val.configure(text="12 профилей")
+        self.assertEqual(card_workers.lbl_val._num.configure.call_args_list[-1][1]["text"], "12")
+        self.assertEqual(card_workers.lbl_val._suf.configure.call_args_list[-1][1]["text"], " Profiles")
+
+        # 4. Status card
+        card_status = app._create_status_card(parent_mock)
+        self.assertTrue(hasattr(card_status, "lbl_val"))
+        card_status.lbl_val.configure(text="Выполняется...")
+        self.assertEqual(card_status.lbl_val._status.configure.call_args_list[-1][1]["text"], "Running")
+
+        # 5. Proxies card
+        card_proxies = app._create_proxies_card(parent_mock)
+        self.assertTrue(hasattr(card_proxies, "lbl_val"))
+        card_proxies.lbl_val.configure(text="Good: 263 | Slow: 0")
+        self.assertEqual(card_proxies.lbl_val._good.configure.call_args_list[-1][1]["text"], "Good: 263")
+        self.assertEqual(card_proxies.lbl_val._slow.configure.call_args_list[-1][1]["text"], "Slow: 0")
+
 
 if __name__ == "__main__":
     unittest.main()

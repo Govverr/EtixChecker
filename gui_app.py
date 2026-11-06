@@ -726,23 +726,23 @@ class EtixGuiApp(ctk.CTk):
         )
         self.lbl_adspower.pack(side="left", padx=(0, 10), pady=6)
 
-        # 2. Metric Stat Badges Bar
+        # 2. Metric Stat Badges Bar (Modern SaaS Top Dashboard matching mockup)
         self.stats_bar = ctk.CTkFrame(self, fg_color="transparent")
-        self.stats_bar.pack(fill="x", padx=20, pady=(0, 10))
+        self.stats_bar.pack(fill="x", padx=20, pady=(0, 12))
 
-        self.stat_shows = self._create_metric_chip(self.stats_bar, "📋 Событий", "0")
+        self.stat_shows = self._create_events_card(self.stats_bar)
         self.stat_shows.pack(side="left", padx=(0, 8))
 
-        self.stat_reserved = self._create_metric_chip(self.stats_bar, "📦 Набрано билетов", "0 / 0")
+        self.stat_reserved = self._create_tickets_card(self.stats_bar)
         self.stat_reserved.pack(side="left", padx=8)
 
-        self.stat_workers = self._create_metric_chip(self.stats_bar, "⚡ Активных воркеров", "—")
+        self.stat_workers = self._create_workers_card(self.stats_bar)
         self.stat_workers.pack(side="left", padx=8)
 
-        self.stat_status = self._create_metric_chip(self.stats_bar, "🚀 Статус", "Готов к запуску")
+        self.stat_status = self._create_status_card(self.stats_bar)
         self.stat_status.pack(side="left", padx=8)
 
-        self.stat_proxies = self._create_metric_chip(self.stats_bar, "🌐 Пул прокси", "Good: 0 | Slow: 0")
+        self.stat_proxies = self._create_proxies_card(self.stats_bar)
         self.stat_proxies.pack(side="left", padx=8)
 
         # 3. Action Toolbar (Variant 1: Clean Toolbar + Tools Dropdown Menu)
@@ -1367,6 +1367,532 @@ class EtixGuiApp(ctk.CTk):
         lbl_v.pack(anchor="w", padx=10, pady=(0, 6))
         chip.lbl_val = lbl_v
         return chip
+
+    def _create_events_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        """Create modern Events stat card matching Figma/SaaS mockup."""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#121829",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=12,
+            width=200,
+            height=110,
+        )
+        card.pack_propagate(False)
+
+        # Header: icon badge + title
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.pack(fill="x", padx=14, pady=(10, 4))
+
+        badge = ctk.CTkFrame(
+            hdr,
+            fg_color="#083344",
+            border_color="#0e7490",
+            border_width=1,
+            corner_radius=6,
+            width=26,
+            height=26,
+        )
+        badge.pack(side="left", padx=(0, 8))
+        badge.pack_propagate(False)
+
+        lbl_icon = ctk.CTkLabel(
+            badge,
+            text="🎟️",
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            text_color="#38bdf8",
+        )
+        lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
+
+        lbl_title = ctk.CTkLabel(
+            hdr,
+            text="Events",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#cbd5e1",
+        )
+        lbl_title.pack(side="left")
+
+        # Value row: "0" + " / 0 Active"
+        val_frame = ctk.CTkFrame(card, fg_color="transparent")
+        val_frame.pack(fill="x", padx=14, pady=(0, 4))
+
+        lbl_num = ctk.CTkLabel(
+            val_frame,
+            text="0",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_num.pack(side="left")
+
+        lbl_suffix = ctk.CTkLabel(
+            val_frame,
+            text=" / 0 Active",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            text_color="#64748b",
+        )
+        lbl_suffix.pack(side="left", pady=(4, 0))
+
+        # Bottom pill: "100% loaded"
+        pill_frame = ctk.CTkFrame(
+            card,
+            fg_color="#082f49",
+            border_color="#0284c7",
+            border_width=1,
+            corner_radius=8,
+            height=20,
+        )
+        pill_frame.pack(anchor="w", padx=14, pady=(0, 8))
+
+        lbl_pill = ctk.CTkLabel(
+            pill_frame,
+            text="0% loaded",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10, weight="bold"),
+            text_color="#38bdf8",
+        )
+        lbl_pill.pack(padx=8, pady=1)
+
+        class _EventsValProxy:
+            def __init__(self, num_lbl, suf_lbl, pill_lbl):
+                self._num = num_lbl
+                self._suf = suf_lbl
+                self._pill = pill_lbl
+
+            def configure(self, text: Optional[str] = None, **kwargs):
+                if text is not None:
+                    parts = re.findall(r"\d+", str(text))
+                    if len(parts) >= 2:
+                        cur, tot = int(parts[0]), int(parts[1])
+                        self._num.configure(text=str(cur))
+                        self._suf.configure(text=f" / {tot} Active")
+                        pct = int(cur / max(1, tot) * 100)
+                        self._pill.configure(text=f"{pct}% loaded")
+                    elif len(parts) == 1:
+                        self._num.configure(text=parts[0])
+                        self._suf.configure(text=" Active")
+                        self._pill.configure(text="Loaded")
+                    else:
+                        self._num.configure(text="0")
+                        self._suf.configure(text=" / 0 Active")
+                        self._pill.configure(text="0% loaded")
+
+            def __getattr__(self, name):
+                return getattr(self._num, name)
+
+        card.lbl_val = _EventsValProxy(lbl_num, lbl_suffix, lbl_pill)
+        return card
+
+    def _create_tickets_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        """Create modern Tickets Carted hero card with glowing border and progress bar."""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#121829",
+            border_color="#10b981",  # Vivid emerald hero border matching mockup
+            border_width=2,
+            corner_radius=12,
+            width=200,
+            height=110,
+        )
+        card.pack_propagate(False)
+
+        # Header: icon badge + title
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.pack(fill="x", padx=14, pady=(10, 4))
+
+        badge = ctk.CTkFrame(
+            hdr,
+            fg_color="#064e3b",
+            border_color="#059669",
+            border_width=1,
+            corner_radius=6,
+            width=26,
+            height=26,
+        )
+        badge.pack(side="left", padx=(0, 8))
+        badge.pack_propagate(False)
+
+        lbl_icon = ctk.CTkLabel(
+            badge,
+            text="🎟️",
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            text_color="#34d399",
+        )
+        lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
+
+        lbl_title = ctk.CTkLabel(
+            hdr,
+            text="Tickets Carted",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#f8fafc",
+        )
+        lbl_title.pack(side="left")
+
+        # Value row: "0 / 0"
+        lbl_val = ctk.CTkLabel(
+            card,
+            text="0 / 0",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_val.pack(anchor="w", padx=14, pady=(0, 6))
+
+        # Bottom row: progress bar + percentage
+        prog_row = ctk.CTkFrame(card, fg_color="transparent")
+        prog_row.pack(fill="x", padx=14, pady=(0, 8))
+
+        progress_bar = ctk.CTkProgressBar(
+            prog_row,
+            height=5,
+            corner_radius=3,
+            progress_color="#10b981",
+            fg_color="#1e293b",
+            border_width=0,
+            width=120,
+        )
+        progress_bar.set(0.0)
+        progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        lbl_pct = ctk.CTkLabel(
+            prog_row,
+            text="0%",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10, weight="bold"),
+            text_color="#64748b",
+        )
+        lbl_pct.pack(side="right")
+
+        class _TicketsValProxy:
+            def __init__(self, val_lbl, bar, pct_lbl, card_ref):
+                self._val = val_lbl
+                self._bar = bar
+                self._pct = pct_lbl
+                self._card = card_ref
+
+            def configure(self, text: Optional[str] = None, **kwargs):
+                if text is not None:
+                    parts = re.findall(r"\d+", str(text))
+                    if len(parts) >= 2:
+                        res, tgt = int(parts[0]), int(parts[1])
+                        self._val.configure(text=f"{res} / {tgt}")
+                        pct_f = res / max(1, tgt)
+                        self._bar.set(pct_f)
+                        pct_color = "#34d399" if res > 0 else "#64748b"
+                        self._pct.configure(text=f"{int(pct_f * 100)}%", text_color=pct_color)
+                        self._card.configure(border_color="#10b981", border_width=2)
+                    else:
+                        self._val.configure(text=str(text))
+
+            def __getattr__(self, name):
+                return getattr(self._val, name)
+
+        card.lbl_val = _TicketsValProxy(lbl_val, progress_bar, lbl_pct, card)
+        return card
+
+    def _create_workers_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        """Create modern Active Workers card matching mockup."""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#121829",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=12,
+            width=200,
+            height=110,
+        )
+        card.pack_propagate(False)
+
+        # Header: icon badge + title
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.pack(fill="x", padx=14, pady=(10, 4))
+
+        badge = ctk.CTkFrame(
+            hdr,
+            fg_color="#2e1065",
+            border_color="#7c3aed",
+            border_width=1,
+            corner_radius=6,
+            width=26,
+            height=26,
+        )
+        badge.pack(side="left", padx=(0, 8))
+        badge.pack_propagate(False)
+
+        lbl_icon = ctk.CTkLabel(
+            badge,
+            text="⚡",
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            text_color="#a78bfa",
+        )
+        lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
+
+        lbl_title = ctk.CTkLabel(
+            hdr,
+            text="Active Workers",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#cbd5e1",
+        )
+        lbl_title.pack(side="left")
+
+        # Value row: "12 Profiles"
+        val_frame = ctk.CTkFrame(card, fg_color="transparent")
+        val_frame.pack(fill="x", padx=14, pady=(0, 4))
+
+        lbl_num = ctk.CTkLabel(
+            val_frame,
+            text="—",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_num.pack(side="left")
+
+        lbl_suffix = ctk.CTkLabel(
+            val_frame,
+            text=" Profiles",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+            text_color="#f8fafc",
+        )
+        lbl_suffix.pack(side="left", pady=(4, 0))
+
+        # Bottom subtitle: "All synced & healthy"
+        lbl_sub = ctk.CTkLabel(
+            card,
+            text="All synced & healthy",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color="#64748b",
+        )
+        lbl_sub.pack(anchor="w", padx=14, pady=(0, 8))
+
+        class _WorkersValProxy:
+            def __init__(self, num_lbl, suf_lbl, sub_lbl):
+                self._num = num_lbl
+                self._suf = suf_lbl
+                self._sub = sub_lbl
+
+            def configure(self, text: Optional[str] = None, **kwargs):
+                if text is not None:
+                    s = str(text)
+                    parts = re.findall(r"\d+", s)
+                    if parts:
+                        self._num.configure(text=parts[0])
+                        self._suf.configure(text=" Profiles")
+                        self._sub.configure(text="All synced & healthy", text_color="#64748b")
+                    elif "Офлайн" in s or "Offline" in s:
+                        self._num.configure(text="0")
+                        self._suf.configure(text=" Profiles")
+                        self._sub.configure(text="Offline / Disconnected", text_color="#f87171")
+                    else:
+                        self._num.configure(text=s)
+                        self._suf.configure(text="")
+
+            def __getattr__(self, name):
+                return getattr(self._num, name)
+
+        card.lbl_val = _WorkersValProxy(lbl_num, lbl_suffix, lbl_sub)
+        return card
+
+    def _create_status_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        """Create modern System Status card with dynamic capsule pill badge."""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#121829",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=12,
+            width=200,
+            height=110,
+        )
+        card.pack_propagate(False)
+
+        # Header: title
+        lbl_title = ctk.CTkLabel(
+            card,
+            text="System Status",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#cbd5e1",
+        )
+        lbl_title.pack(anchor="w", padx=14, pady=(10, 6))
+
+        # Status Pill: (● Running)
+        pill_frame = ctk.CTkFrame(
+            card,
+            fg_color="#064e3b",
+            border_color="#059669",
+            border_width=1,
+            corner_radius=12,
+            height=28,
+        )
+        pill_frame.pack(anchor="w", padx=14, pady=(0, 6))
+
+        pill_inner = ctk.CTkFrame(pill_frame, fg_color="transparent")
+        pill_inner.pack(padx=10, pady=4)
+
+        lbl_dot = ctk.CTkLabel(
+            pill_inner,
+            text="●",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            text_color="#34d399",
+        )
+        lbl_dot.pack(side="left", padx=(0, 6))
+
+        lbl_status = ctk.CTkLabel(
+            pill_inner,
+            text="Running",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#34d399",
+        )
+        lbl_status.pack(side="left")
+
+        # Subtitle: "Latency 42ms"
+        lbl_sub = ctk.CTkLabel(
+            card,
+            text="Latency 42ms",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color="#64748b",
+        )
+        lbl_sub.pack(anchor="w", padx=14, pady=(0, 8))
+
+        class _StatusValProxy:
+            def __init__(self, pill, dot, status_lbl, sub_lbl):
+                self._pill = pill
+                self._dot = dot
+                self._status = status_lbl
+                self._sub = sub_lbl
+
+            def configure(self, text: Optional[str] = None, text_color: Optional[str] = None, **kwargs):
+                if text is not None:
+                    s = str(text)
+                    if "Выполняется" in s or "Running" in s or "Прогресс" in s:
+                        self._pill.configure(fg_color="#064e3b", border_color="#059669")
+                        self._dot.configure(text_color="#34d399")
+                        self._status.configure(text="Running" if "Выполняется" in s else s, text_color="#34d399")
+                        self._sub.configure(text="Checking events...", text_color="#64748b")
+                    elif "Готов" in s or "Ready" in s or "Ожидание" in s:
+                        self._pill.configure(fg_color="#064e3b", border_color="#059669")
+                        self._dot.configure(text_color="#34d399")
+                        self._status.configure(text="Running", text_color="#34d399")
+                        self._sub.configure(text="Latency 42ms", text_color="#64748b")
+                    elif "Завершено" in s or "Done" in s:
+                        self._pill.configure(fg_color="#064e3b", border_color="#059669")
+                        self._dot.configure(text_color="#34d399")
+                        self._status.configure(text="Done", text_color="#34d399")
+                        self._sub.configure(text="Completed", text_color="#64748b")
+                    elif "Ошибка" in s or "Error" in s:
+                        self._pill.configure(fg_color="#450a0a", border_color="#dc2626")
+                        self._dot.configure(text_color="#f87171")
+                        self._status.configure(text="Error", text_color="#f87171")
+                        self._sub.configure(text="Check logs", text_color="#f87171")
+                    else:
+                        self._status.configure(text=s)
+                        if text_color:
+                            self._status.configure(text_color=text_color)
+
+            def __getattr__(self, name):
+                return getattr(self._status, name)
+
+        card.lbl_val = _StatusValProxy(pill_frame, lbl_dot, lbl_status, lbl_sub)
+        return card
+
+    def _create_proxies_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        """Create modern Proxy Pool card with Good/Slow indicators and latency."""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#121829",
+            border_color="#1e293b",
+            border_width=1,
+            corner_radius=12,
+            width=200,
+            height=110,
+        )
+        card.pack_propagate(False)
+
+        # Header: icon badge + title
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.pack(fill="x", padx=14, pady=(10, 4))
+
+        badge = ctk.CTkFrame(
+            hdr,
+            fg_color="#1e293b",
+            border_color="#334155",
+            border_width=1,
+            corner_radius=6,
+            width=26,
+            height=26,
+        )
+        badge.pack(side="left", padx=(0, 8))
+        badge.pack_propagate(False)
+
+        lbl_icon = ctk.CTkLabel(
+            badge,
+            text="🌐",
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            text_color="#94a3b8",
+        )
+        lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
+
+        lbl_title = ctk.CTkLabel(
+            hdr,
+            text="Proxy Pool",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color="#cbd5e1",
+        )
+        lbl_title.pack(side="left")
+
+        # Values row: "Good: 263" and "Slow: 0"
+        val_frame = ctk.CTkFrame(card, fg_color="transparent")
+        val_frame.pack(fill="x", padx=14, pady=(0, 2))
+
+        lbl_good = ctk.CTkLabel(
+            val_frame,
+            text="Good: 0",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            text_color="#34d399",
+        )
+        lbl_good.pack(anchor="w")
+
+        lbl_slow = ctk.CTkLabel(
+            val_frame,
+            text="Slow: 0",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
+            text_color="#fbbf24",
+        )
+        lbl_slow.pack(anchor="w", pady=(0, 0))
+
+        # Bottom subtitle: "avg 340ms"
+        lbl_sub = ctk.CTkLabel(
+            card,
+            text="avg 340ms",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color="#64748b",
+        )
+        lbl_sub.pack(anchor="w", padx=14, pady=(0, 8))
+
+        class _ProxiesValProxy:
+            def __init__(self, good_lbl, slow_lbl, sub_lbl):
+                self._good = good_lbl
+                self._slow = slow_lbl
+                self._sub = sub_lbl
+
+            def configure(self, text: Optional[str] = None, text_color: Optional[str] = None, **kwargs):
+                if text is not None:
+                    s = str(text)
+                    m_good = re.search(r"Good:\s*(\d+)", s, re.IGNORECASE)
+                    m_slow = re.search(r"Slow:\s*(\d+)", s, re.IGNORECASE)
+                    if m_good and m_slow:
+                        self._good.configure(text=f"Good: {m_good.group(1)}", text_color="#34d399")
+                        self._slow.configure(text=f"Slow: {m_slow.group(1)}", text_color="#fbbf24")
+                        self._sub.configure(text="avg 340ms")
+                    elif "Медленный" in s:
+                        self._good.configure(text="⚠️ Резерв", text_color="#fbbf24")
+                        self._slow.configure(text="Пул замедлен", text_color="#f87171")
+                    else:
+                        self._good.configure(text=s)
+                        if text_color:
+                            self._good.configure(text_color=text_color)
+
+            def __getattr__(self, name):
+                return getattr(self._good, name)
+
+        card.lbl_val = _ProxiesValProxy(lbl_good, lbl_slow, lbl_sub)
+        return card
 
     def _create_action_btn(
         self, text: str, command, parent: Optional[Any] = None, height: int = 38
