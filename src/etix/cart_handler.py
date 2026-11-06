@@ -50,7 +50,7 @@ class EtixCartHandler:
         try:
             await page.wait_for_selector(
                 ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select",
-                timeout=12000,
+                timeout=8000,
             )
         except Exception:
             pass

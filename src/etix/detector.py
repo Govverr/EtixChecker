@@ -117,7 +117,7 @@ class EtixDetector:
         except Exception:
             return False
 
-    async def switch_to_price_level_if_seating_chart(self, page: Page, wait_timeout_ms: int = 7000) -> bool:
+    async def switch_to_price_level_if_seating_chart(self, page: Page, wait_timeout_ms: int = 4000) -> bool:
         """
         Check if the page has both 'Seating Chart' and 'Price Level' tabs.
         If present and not yet active, switch to 'Price Level' tab to reveal ticket selectors.

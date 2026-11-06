@@ -845,6 +845,14 @@ class EtixCheckEngine:
                     LOGGER.warning(
                         f"[Worker #{current_worker.worker_index}] Chrome network error / bad proxy on '{current_worker.profile.name}'."
                     )
+                    try:
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="bad_proxy",
+                            reason="Chrome network error / bad proxy unreachable"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="bad_proxy")
+                    except Exception:
+                        pass
                     if current_worker.profile.proxy_key:
                         self.profile_manager.record_bad_proxy(current_worker.profile.proxy_key, "Network unreachable")
                     self.profile_manager.record_blocked_profile(current_worker.profile, "Network / proxy unreachable")
@@ -924,7 +932,7 @@ class EtixCheckEngine:
                     )
                     # Poll for DataDome sync, frame detachment, or ticket controls appearance (up to 4.5s)
                     poll_synced = False
-                    sync_deadline = asyncio.get_event_loop().time() + 4.5
+                    sync_deadline = asyncio.get_event_loop().time() + 3.0
                     while asyncio.get_event_loop().time() < sync_deadline:
                         await asyncio.sleep(0.3)
                         # Check if ticket controls or content have appeared!
@@ -1001,7 +1009,7 @@ class EtixCheckEngine:
                             LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
 
                     # After reload, wait for asynchronous DataDome hydration or controls rendering
-                    await human_sleep((1000, 1500))
+                    await human_sleep((600, 1000))
 
                     # Fast-path check: Did ticket controls appear after reload?
                     controls_ready_after_reload = False
@@ -1132,6 +1140,14 @@ class EtixCheckEngine:
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] reCAPTCHA not resolved on show entry ({r_reason}). Hot-swapping..."
                         )
+                        try:
+                            await self.reporter.save_dom_dump(
+                                current_worker.page, show.name, prefix="recaptcha_entry_fail",
+                                reason=f"reCAPTCHA not resolved on show entry: {r_reason}"
+                            )
+                            await self.reporter.save_screenshot(current_worker.page, show.name, prefix="recaptcha_entry_fail")
+                        except Exception:
+                            pass
                         self.profile_manager.record_blocked_profile(
                             current_worker.profile, f"reCAPTCHA on entry: {r_reason}"
                         )
@@ -1259,6 +1275,14 @@ class EtixCheckEngine:
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] Page hard-blocked by DataDome after soft reload. Hot-swapping immediately..."
                         )
+                        try:
+                            await self.reporter.save_dom_dump(
+                                current_worker.page, show.name, prefix="blocked_after_reload",
+                                reason="DataDome Hard Block after reload"
+                            )
+                            await self.reporter.save_screenshot(current_worker.page, show.name, prefix="blocked_after_reload")
+                        except Exception:
+                            pass
                         self.profile_manager.record_blocked_profile(
                             current_worker.profile, "DataDome: Access Temporarily Blocked after reload"
                         )
@@ -1305,6 +1329,14 @@ class EtixCheckEngine:
                         f"[Worker #{current_worker.worker_index}] Page controls missing on '{current_worker.profile.name}'. "
                         f"Swapping with reserve ({swaps_done + 1}/{max_profile_swaps})..."
                     )
+                    try:
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="controls_missing",
+                            reason="Page controls missing / unresponsive"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="controls_missing")
+                    except Exception:
+                        pass
                     new_w = await self.cdp_pool.replace_worker_with_reserve(
                         current_worker, reason="Controls missing / page unresponsive"
                     )
@@ -1318,6 +1350,14 @@ class EtixCheckEngine:
                     f"[Worker #{current_worker.worker_index}] Failed to confirm readiness on {show.url}. Closing failing browser."
                 )
                 if self.cdp_pool:
+                    try:
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="readiness_failed",
+                            reason="Readiness confirmation failed"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="readiness_failed")
+                    except Exception:
+                        pass
                     await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Readiness confirmation failed")
                 return None
 
