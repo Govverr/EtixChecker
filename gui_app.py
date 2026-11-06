@@ -728,22 +728,22 @@ class EtixGuiApp(ctk.CTk):
 
         # 2. Metric Stat Badges Bar (Modern SaaS Top Dashboard matching mockup)
         self.stats_bar = ctk.CTkFrame(self, fg_color="transparent")
-        self.stats_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.stats_bar.pack(fill="x", padx=20, pady=(0, 10))
 
         self.stat_shows = self._create_events_card(self.stats_bar)
-        self.stat_shows.pack(side="left", padx=(0, 8))
+        self.stat_shows.pack(side="left", padx=(0, 6))
 
         self.stat_reserved = self._create_tickets_card(self.stats_bar)
-        self.stat_reserved.pack(side="left", padx=8)
+        self.stat_reserved.pack(side="left", padx=6)
 
         self.stat_workers = self._create_workers_card(self.stats_bar)
-        self.stat_workers.pack(side="left", padx=8)
+        self.stat_workers.pack(side="left", padx=6)
 
         self.stat_status = self._create_status_card(self.stats_bar)
-        self.stat_status.pack(side="left", padx=8)
+        self.stat_status.pack(side="left", padx=6)
 
         self.stat_proxies = self._create_proxies_card(self.stats_bar)
-        self.stat_proxies.pack(side="left", padx=8)
+        self.stat_proxies.pack(side="left", padx=6)
 
         # 3. Action Toolbar (Variant 1: Clean Toolbar + Tools Dropdown Menu)
         self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -1369,38 +1369,38 @@ class EtixGuiApp(ctk.CTk):
         return chip
 
     def _create_events_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        """Create modern Events stat card matching Figma/SaaS mockup."""
+        """Create compact modern Events stat card matching Figma/SaaS mockup."""
         card = ctk.CTkFrame(
             parent,
             fg_color="#121829",
             border_color="#1e293b",
             border_width=1,
-            corner_radius=12,
-            width=200,
-            height=110,
+            corner_radius=8,
+            width=160,
+            height=74,
         )
         card.pack_propagate(False)
 
         # Header: icon badge + title
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.pack(fill="x", padx=14, pady=(10, 4))
+        hdr.pack(fill="x", padx=10, pady=(6, 2))
 
         badge = ctk.CTkFrame(
             hdr,
             fg_color="#083344",
             border_color="#0e7490",
             border_width=1,
-            corner_radius=6,
-            width=26,
-            height=26,
+            corner_radius=4,
+            width=20,
+            height=20,
         )
-        badge.pack(side="left", padx=(0, 8))
+        badge.pack(side="left", padx=(0, 6))
         badge.pack_propagate(False)
 
         lbl_icon = ctk.CTkLabel(
             badge,
             text="🎟️",
-            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=10),
             text_color="#38bdf8",
         )
         lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
@@ -1408,19 +1408,19 @@ class EtixGuiApp(ctk.CTk):
         lbl_title = ctk.CTkLabel(
             hdr,
             text="Events",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#cbd5e1",
         )
         lbl_title.pack(side="left")
 
         # Value row: "0" + " / 0 Active"
         val_frame = ctk.CTkFrame(card, fg_color="transparent")
-        val_frame.pack(fill="x", padx=14, pady=(0, 4))
+        val_frame.pack(fill="x", padx=10, pady=(0, 2))
 
         lbl_num = ctk.CTkLabel(
             val_frame,
             text="0",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
             text_color="#ffffff",
         )
         lbl_num.pack(side="left")
@@ -1428,10 +1428,10 @@ class EtixGuiApp(ctk.CTk):
         lbl_suffix = ctk.CTkLabel(
             val_frame,
             text=" / 0 Active",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
             text_color="#64748b",
         )
-        lbl_suffix.pack(side="left", pady=(4, 0))
+        lbl_suffix.pack(side="left", pady=(2, 0))
 
         # Bottom pill: "100% loaded"
         pill_frame = ctk.CTkFrame(
@@ -1439,18 +1439,18 @@ class EtixGuiApp(ctk.CTk):
             fg_color="#082f49",
             border_color="#0284c7",
             border_width=1,
-            corner_radius=8,
-            height=20,
+            corner_radius=6,
+            height=16,
         )
-        pill_frame.pack(anchor="w", padx=14, pady=(0, 8))
+        pill_frame.pack(anchor="w", padx=10, pady=(0, 6))
 
         lbl_pill = ctk.CTkLabel(
             pill_frame,
             text="0% loaded",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=10, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=9, weight="bold"),
             text_color="#38bdf8",
         )
-        lbl_pill.pack(padx=8, pady=1)
+        lbl_pill.pack(padx=6, pady=0)
 
         class _EventsValProxy:
             def __init__(self, num_lbl, suf_lbl, pill_lbl):
@@ -1483,38 +1483,38 @@ class EtixGuiApp(ctk.CTk):
         return card
 
     def _create_tickets_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        """Create modern Tickets Carted hero card with glowing border and progress bar."""
+        """Create compact modern Tickets Carted hero card with glowing border and progress bar."""
         card = ctk.CTkFrame(
             parent,
             fg_color="#121829",
             border_color="#10b981",  # Vivid emerald hero border matching mockup
             border_width=2,
-            corner_radius=12,
-            width=200,
-            height=110,
+            corner_radius=8,
+            width=160,
+            height=74,
         )
         card.pack_propagate(False)
 
         # Header: icon badge + title
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.pack(fill="x", padx=14, pady=(10, 4))
+        hdr.pack(fill="x", padx=10, pady=(6, 2))
 
         badge = ctk.CTkFrame(
             hdr,
             fg_color="#064e3b",
             border_color="#059669",
             border_width=1,
-            corner_radius=6,
-            width=26,
-            height=26,
+            corner_radius=4,
+            width=20,
+            height=20,
         )
-        badge.pack(side="left", padx=(0, 8))
+        badge.pack(side="left", padx=(0, 6))
         badge.pack_propagate(False)
 
         lbl_icon = ctk.CTkLabel(
             badge,
             text="🎟️",
-            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=10),
             text_color="#34d399",
         )
         lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
@@ -1522,7 +1522,7 @@ class EtixGuiApp(ctk.CTk):
         lbl_title = ctk.CTkLabel(
             hdr,
             text="Tickets Carted",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#f8fafc",
         )
         lbl_title.pack(side="left")
@@ -1531,31 +1531,31 @@ class EtixGuiApp(ctk.CTk):
         lbl_val = ctk.CTkLabel(
             card,
             text="0 / 0",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
             text_color="#ffffff",
         )
-        lbl_val.pack(anchor="w", padx=14, pady=(0, 6))
+        lbl_val.pack(anchor="w", padx=10, pady=(0, 3))
 
         # Bottom row: progress bar + percentage
         prog_row = ctk.CTkFrame(card, fg_color="transparent")
-        prog_row.pack(fill="x", padx=14, pady=(0, 8))
+        prog_row.pack(fill="x", padx=10, pady=(0, 6))
 
         progress_bar = ctk.CTkProgressBar(
             prog_row,
-            height=5,
-            corner_radius=3,
+            height=4,
+            corner_radius=2,
             progress_color="#10b981",
             fg_color="#1e293b",
             border_width=0,
-            width=120,
+            width=95,
         )
         progress_bar.set(0.0)
-        progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         lbl_pct = ctk.CTkLabel(
             prog_row,
             text="0%",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=10, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=9, weight="bold"),
             text_color="#64748b",
         )
         lbl_pct.pack(side="right")
@@ -1588,38 +1588,38 @@ class EtixGuiApp(ctk.CTk):
         return card
 
     def _create_workers_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        """Create modern Active Workers card matching mockup."""
+        """Create compact modern Active Workers card matching mockup."""
         card = ctk.CTkFrame(
             parent,
             fg_color="#121829",
             border_color="#1e293b",
             border_width=1,
-            corner_radius=12,
-            width=200,
-            height=110,
+            corner_radius=8,
+            width=160,
+            height=74,
         )
         card.pack_propagate(False)
 
         # Header: icon badge + title
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.pack(fill="x", padx=14, pady=(10, 4))
+        hdr.pack(fill="x", padx=10, pady=(6, 2))
 
         badge = ctk.CTkFrame(
             hdr,
             fg_color="#2e1065",
             border_color="#7c3aed",
             border_width=1,
-            corner_radius=6,
-            width=26,
-            height=26,
+            corner_radius=4,
+            width=20,
+            height=20,
         )
-        badge.pack(side="left", padx=(0, 8))
+        badge.pack(side="left", padx=(0, 6))
         badge.pack_propagate(False)
 
         lbl_icon = ctk.CTkLabel(
             badge,
             text="⚡",
-            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=10),
             text_color="#a78bfa",
         )
         lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
@@ -1627,19 +1627,19 @@ class EtixGuiApp(ctk.CTk):
         lbl_title = ctk.CTkLabel(
             hdr,
             text="Active Workers",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#cbd5e1",
         )
         lbl_title.pack(side="left")
 
         # Value row: "12 Profiles"
         val_frame = ctk.CTkFrame(card, fg_color="transparent")
-        val_frame.pack(fill="x", padx=14, pady=(0, 4))
+        val_frame.pack(fill="x", padx=10, pady=(0, 2))
 
         lbl_num = ctk.CTkLabel(
             val_frame,
             text="—",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=24, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
             text_color="#ffffff",
         )
         lbl_num.pack(side="left")
@@ -1647,19 +1647,19 @@ class EtixGuiApp(ctk.CTk):
         lbl_suffix = ctk.CTkLabel(
             val_frame,
             text=" Profiles",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
             text_color="#f8fafc",
         )
-        lbl_suffix.pack(side="left", pady=(4, 0))
+        lbl_suffix.pack(side="left", pady=(2, 0))
 
         # Bottom subtitle: "All synced & healthy"
         lbl_sub = ctk.CTkLabel(
             card,
             text="All synced & healthy",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#64748b",
         )
-        lbl_sub.pack(anchor="w", padx=14, pady=(0, 8))
+        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
 
         class _WorkersValProxy:
             def __init__(self, num_lbl, suf_lbl, sub_lbl):
@@ -1690,15 +1690,15 @@ class EtixGuiApp(ctk.CTk):
         return card
 
     def _create_status_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        """Create modern System Status card with dynamic capsule pill badge."""
+        """Create compact modern System Status card with dynamic capsule pill badge."""
         card = ctk.CTkFrame(
             parent,
             fg_color="#121829",
             border_color="#1e293b",
             border_width=1,
-            corner_radius=12,
-            width=200,
-            height=110,
+            corner_radius=8,
+            width=160,
+            height=74,
         )
         card.pack_propagate(False)
 
@@ -1706,10 +1706,10 @@ class EtixGuiApp(ctk.CTk):
         lbl_title = ctk.CTkLabel(
             card,
             text="System Status",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#cbd5e1",
         )
-        lbl_title.pack(anchor="w", padx=14, pady=(10, 6))
+        lbl_title.pack(anchor="w", padx=10, pady=(6, 2))
 
         # Status Pill: (● Running)
         pill_frame = ctk.CTkFrame(
@@ -1717,26 +1717,26 @@ class EtixGuiApp(ctk.CTk):
             fg_color="#064e3b",
             border_color="#059669",
             border_width=1,
-            corner_radius=12,
-            height=28,
+            corner_radius=10,
+            height=22,
         )
-        pill_frame.pack(anchor="w", padx=14, pady=(0, 6))
+        pill_frame.pack(anchor="w", padx=10, pady=(0, 2))
 
         pill_inner = ctk.CTkFrame(pill_frame, fg_color="transparent")
-        pill_inner.pack(padx=10, pady=4)
+        pill_inner.pack(padx=8, pady=2)
 
         lbl_dot = ctk.CTkLabel(
             pill_inner,
             text="●",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
             text_color="#34d399",
         )
-        lbl_dot.pack(side="left", padx=(0, 6))
+        lbl_dot.pack(side="left", padx=(0, 4))
 
         lbl_status = ctk.CTkLabel(
             pill_inner,
             text="Running",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10, weight="bold"),
             text_color="#34d399",
         )
         lbl_status.pack(side="left")
@@ -1745,10 +1745,10 @@ class EtixGuiApp(ctk.CTk):
         lbl_sub = ctk.CTkLabel(
             card,
             text="Latency 42ms",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#64748b",
         )
-        lbl_sub.pack(anchor="w", padx=14, pady=(0, 8))
+        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
 
         class _StatusValProxy:
             def __init__(self, pill, dot, status_lbl, sub_lbl):
@@ -1792,38 +1792,38 @@ class EtixGuiApp(ctk.CTk):
         return card
 
     def _create_proxies_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        """Create modern Proxy Pool card with Good/Slow indicators and latency."""
+        """Create compact modern Proxy Pool card with Good/Slow indicators and latency."""
         card = ctk.CTkFrame(
             parent,
             fg_color="#121829",
             border_color="#1e293b",
             border_width=1,
-            corner_radius=12,
-            width=200,
-            height=110,
+            corner_radius=8,
+            width=160,
+            height=74,
         )
         card.pack_propagate(False)
 
         # Header: icon badge + title
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.pack(fill="x", padx=14, pady=(10, 4))
+        hdr.pack(fill="x", padx=10, pady=(6, 2))
 
         badge = ctk.CTkFrame(
             hdr,
             fg_color="#1e293b",
             border_color="#334155",
             border_width=1,
-            corner_radius=6,
-            width=26,
-            height=26,
+            corner_radius=4,
+            width=20,
+            height=20,
         )
-        badge.pack(side="left", padx=(0, 8))
+        badge.pack(side="left", padx=(0, 6))
         badge.pack_propagate(False)
 
         lbl_icon = ctk.CTkLabel(
             badge,
             text="🌐",
-            font=ctk.CTkFont(family="Segoe UI Emoji", size=11),
+            font=ctk.CTkFont(family="Segoe UI Emoji", size=10),
             text_color="#94a3b8",
         )
         lbl_icon.place(relx=0.5, rely=0.5, anchor="center")
@@ -1831,39 +1831,39 @@ class EtixGuiApp(ctk.CTk):
         lbl_title = ctk.CTkLabel(
             hdr,
             text="Proxy Pool",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#cbd5e1",
         )
         lbl_title.pack(side="left")
 
-        # Values row: "Good: 263" and "Slow: 0"
+        # Values row: "Good: 263" and "Slow: 0" side by side
         val_frame = ctk.CTkFrame(card, fg_color="transparent")
-        val_frame.pack(fill="x", padx=14, pady=(0, 2))
+        val_frame.pack(fill="x", padx=10, pady=(0, 2))
 
         lbl_good = ctk.CTkLabel(
             val_frame,
             text="Good: 0",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             text_color="#34d399",
         )
-        lbl_good.pack(anchor="w")
+        lbl_good.pack(side="left", padx=(0, 8))
 
         lbl_slow = ctk.CTkLabel(
             val_frame,
             text="Slow: 0",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             text_color="#fbbf24",
         )
-        lbl_slow.pack(anchor="w", pady=(0, 0))
+        lbl_slow.pack(side="left")
 
         # Bottom subtitle: "avg 340ms"
         lbl_sub = ctk.CTkLabel(
             card,
             text="avg 340ms",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#64748b",
         )
-        lbl_sub.pack(anchor="w", padx=14, pady=(0, 8))
+        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
 
         class _ProxiesValProxy:
             def __init__(self, good_lbl, slow_lbl, sub_lbl):
