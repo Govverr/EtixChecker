@@ -297,21 +297,27 @@ class EtixCheckEngine:
                 wait_until="domcontentloaded",
                 timeout=self.config.nav_timeout,
             )
-            await human_sleep((300, 600))
-            await accept_cookies_if_present(primary_worker.page)
-            await close_blocking_popups(primary_worker.page)
-            await handle_empty_shopping_cart_conflict(primary_worker.page, target_url=show.url)
-
-            # Switch to Price Level IMMEDIATELY if Seating Chart tabs are present
-            await self.detector.switch_to_price_level_if_seating_chart(primary_worker.page)
-
-            try:
-                await primary_worker.page.wait_for_selector(
-                    ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select, button:has-text('Add Tickets'), input[value*='Add Tickets'], div[role='alert']",
-                    timeout=3500,
+            # FAST-PATH: If DataDome hard block immediately appeared on primary worker, bypass cookie/selector waits
+            if await self.detector.is_blocked_page(primary_worker.page):
+                LOGGER.warning(
+                    f"Primary worker '{primary_worker.profile.name}' hit DataDome hard block immediately on {show.url}."
                 )
-            except Exception:
-                pass
+            else:
+                await human_sleep((300, 600))
+                await accept_cookies_if_present(primary_worker.page)
+                await close_blocking_popups(primary_worker.page)
+                await handle_empty_shopping_cart_conflict(primary_worker.page, target_url=show.url)
+
+                # Switch to Price Level IMMEDIATELY if Seating Chart tabs are present
+                await self.detector.switch_to_price_level_if_seating_chart(primary_worker.page)
+
+                try:
+                    await primary_worker.page.wait_for_selector(
+                        ".smoketest-ticket-quantity, [role='combobox'], .MuiSelect-select, select, button:has-text('Add Tickets'), input[value*='Add Tickets'], div[role='alert']",
+                        timeout=3500,
+                    )
+                except Exception:
+                    pass
         except Exception as exc:
             LOGGER.warning(f"Navigation failed for primary worker on {show.url}: {exc}")
             if self.detector.is_bad_proxy_error(exc) and self.cdp_pool:
@@ -350,7 +356,7 @@ class EtixCheckEngine:
                 )
 
         # Step 2: Check SOLD OUT / OFF SALE
-        if await self.detector.is_soldout_page(primary_worker.page):
+        if not await self.detector.is_blocked_page(primary_worker.page) and await self.detector.is_soldout_page(primary_worker.page):
             screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="soldout")
             body_txt = ""
             try:
@@ -376,7 +382,7 @@ class EtixCheckEngine:
             )
 
         # Step 3: Check Sales Ended
-        if await self.detector.is_event_ended_page(primary_worker.page):
+        if not await self.detector.is_blocked_page(primary_worker.page) and await self.detector.is_event_ended_page(primary_worker.page):
             screen = await self.reporter.save_screenshot(primary_worker.page, show.name, prefix="ended")
             LOGGER.info(f"Sales for event '{show.name}' have ENDED.")
             return CheckResult(
@@ -993,7 +999,63 @@ class EtixCheckEngine:
                 is_blocked = not is_slider and await self.detector.is_blocked_page(current_worker.page)
 
                 # 5. Check if blocked (DataDome "Access Temporarily Blocked" or unsolved slider)
-                if is_blocked or is_slider:
+                if is_blocked:
+                    # HARD BLOCK: DataDome returned "Access Temporarily Blocked".
+                    # Reloading or wiping storage on the same IP is completely futile and hangs the worker for 15-30s.
+                    # Fast-exit immediately: record blocked profile, mark proxy bad, and trigger hot-swap with zero reload.
+                    LOGGER.warning(
+                        f"[Worker #{current_worker.worker_index}] Profile '{current_worker.profile.name}' (ID: {current_worker.profile.user_id}) "
+                        f"is HARD-BLOCKED by DataDome ('Access Temporarily Blocked'). Fast-swapping immediately without reload..."
+                    )
+                    try:
+                        await self.reporter.save_dom_dump(
+                            current_worker.page, show.name, prefix="hard_block",
+                            reason="DataDome Hard Block ('Access Temporarily Blocked')"
+                        )
+                        await self.reporter.save_screenshot(current_worker.page, show.name, prefix="hard_block")
+                    except Exception:
+                        pass
+
+                    self.profile_manager.record_blocked_profile(
+                        current_worker.profile,
+                        reason="Access Temporarily Blocked / DataDome"
+                    )
+                    if current_worker.profile.proxy_key:
+                        self.profile_manager.record_bad_proxy(
+                            current_worker.profile.proxy_key,
+                            reason="DataDome Hard Block"
+                        )
+
+                    # Close failing browser and hot-swap if replacements remaining
+                    if swaps_done < max_profile_swaps and self.cdp_pool:
+                        LOGGER.info(
+                            f"[Worker #{current_worker.worker_index}] Closing hard-blocked profile '{current_worker.profile.name}' "
+                            f"and opening reserve from group (Replacement {swaps_done + 1}/{max_profile_swaps})..."
+                        )
+                        new_w = await self.cdp_pool.replace_worker_with_reserve(
+                            current_worker,
+                            reason="DataDome Hard Block"
+                        )
+                        if new_w:
+                            current_worker = new_w
+                            swaps_done += 1
+                            continue
+                        else:
+                            LOGGER.error(
+                                f"[Worker #{current_worker.worker_index}] No reserve profiles available in group for hot-swap."
+                            )
+                            await self.cdp_pool.stop_and_remove_worker(current_worker, reason="No reserve profiles")
+                            return None
+                    else:
+                        LOGGER.error(
+                            f"[Worker #{current_worker.worker_index}] Profile replacement limit ({max_profile_swaps}) "
+                            f"exhausted for this slot. Closing failing browser."
+                        )
+                        if self.cdp_pool:
+                            await self.cdp_pool.stop_and_remove_worker(current_worker, reason="Max profile replacements reached")
+                        return None
+
+                elif is_slider or (round_num > 0 and not poll_synced):
                     if round_num > 0:
                         LOGGER.warning(
                             f"[Worker #{current_worker.worker_index}] Slider was solved ({round_num} rounds), but page needs refresh. "
@@ -1002,7 +1064,7 @@ class EtixCheckEngine:
                         try:
                             await current_worker.page.reload(
                                 wait_until="domcontentloaded",
-                                timeout=min(self.config.nav_timeout, 10000),
+                                timeout=min(self.config.nav_timeout, 8000),
                             )
                         except Exception as reload_err:
                             LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
@@ -1021,7 +1083,7 @@ class EtixCheckEngine:
                             await current_worker.page.goto(
                                 show.url,
                                 wait_until="domcontentloaded",
-                                timeout=min(self.config.nav_timeout, 10000),
+                                timeout=min(self.config.nav_timeout, 8000),
                             )
                         except Exception as reload_err:
                             LOGGER.warning(f"[Worker #{current_worker.worker_index}] Reload attempt error: {reload_err}")
@@ -1126,7 +1188,7 @@ class EtixCheckEngine:
                         )
 
                 # 6. Hydrate and prepare page controls (only if NOT blocked)
-                if needs_nav or is_blocked or is_slider:
+                if needs_nav or is_blocked or is_slider or round_num > 0:
                     await human_sleep((100, 300))
                     await accept_cookies_if_present(current_worker.page)
                     await close_blocking_popups(current_worker.page)

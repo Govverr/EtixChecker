@@ -1376,8 +1376,8 @@ class EtixGuiApp(ctk.CTk):
             border_color="#1e293b",
             border_width=1,
             corner_radius=8,
-            width=160,
-            height=74,
+            width=165,
+            height=88,
         )
         card.pack_propagate(False)
 
@@ -1440,9 +1440,9 @@ class EtixGuiApp(ctk.CTk):
             border_color="#0284c7",
             border_width=1,
             corner_radius=6,
-            height=16,
+            height=18,
         )
-        pill_frame.pack(anchor="w", padx=10, pady=(0, 6))
+        pill_frame.pack(anchor="w", padx=10, pady=(2, 6))
 
         lbl_pill = ctk.CTkLabel(
             pill_frame,
@@ -1450,7 +1450,7 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=9, weight="bold"),
             text_color="#38bdf8",
         )
-        lbl_pill.pack(padx=6, pady=0)
+        lbl_pill.pack(padx=6, pady=1)
 
         class _EventsValProxy:
             def __init__(self, num_lbl, suf_lbl, pill_lbl):
@@ -1490,8 +1490,8 @@ class EtixGuiApp(ctk.CTk):
             border_color="#10b981",  # Vivid emerald hero border matching mockup
             border_width=2,
             corner_radius=8,
-            width=160,
-            height=74,
+            width=165,
+            height=88,
         )
         card.pack_propagate(False)
 
@@ -1534,11 +1534,11 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
             text_color="#ffffff",
         )
-        lbl_val.pack(anchor="w", padx=10, pady=(0, 3))
+        lbl_val.pack(anchor="w", padx=10, pady=(0, 2))
 
         # Bottom row: progress bar + percentage
         prog_row = ctk.CTkFrame(card, fg_color="transparent")
-        prog_row.pack(fill="x", padx=10, pady=(0, 6))
+        prog_row.pack(fill="x", padx=10, pady=(2, 6))
 
         progress_bar = ctk.CTkProgressBar(
             prog_row,
@@ -1595,8 +1595,8 @@ class EtixGuiApp(ctk.CTk):
             border_color="#1e293b",
             border_width=1,
             corner_radius=8,
-            width=160,
-            height=74,
+            width=165,
+            height=88,
         )
         card.pack_propagate(False)
 
@@ -1659,7 +1659,7 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#64748b",
         )
-        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
+        lbl_sub.pack(anchor="w", padx=10, pady=(2, 6))
 
         class _WorkersValProxy:
             def __init__(self, num_lbl, suf_lbl, sub_lbl):
@@ -1697,8 +1697,8 @@ class EtixGuiApp(ctk.CTk):
             border_color="#1e293b",
             border_width=1,
             corner_radius=8,
-            width=160,
-            height=74,
+            width=165,
+            height=88,
         )
         card.pack_propagate(False)
 
@@ -1748,7 +1748,7 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#64748b",
         )
-        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
+        lbl_sub.pack(anchor="w", padx=10, pady=(2, 6))
 
         class _StatusValProxy:
             def __init__(self, pill, dot, status_lbl, sub_lbl):
@@ -1799,8 +1799,8 @@ class EtixGuiApp(ctk.CTk):
             border_color="#1e293b",
             border_width=1,
             corner_radius=8,
-            width=160,
-            height=74,
+            width=165,
+            height=88,
         )
         card.pack_propagate(False)
 
@@ -1863,7 +1863,7 @@ class EtixGuiApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=9),
             text_color="#64748b",
         )
-        lbl_sub.pack(anchor="w", padx=10, pady=(0, 6))
+        lbl_sub.pack(anchor="w", padx=10, pady=(2, 6))
 
         class _ProxiesValProxy:
             def __init__(self, good_lbl, slow_lbl, sub_lbl):
@@ -2170,6 +2170,7 @@ class EtixGuiApp(ctk.CTk):
 
         # Pre-flight Concurrency & Profile Sufficiency Check
         self.profile_manager.reset_session_statuses()
+        self._update_blocked_badge()
         free_profiles = self.profile_manager.get_available_free_profiles()
         busy_profiles = self.profile_manager.get_busy_external_profiles()
 
@@ -2811,7 +2812,6 @@ class EtixGuiApp(ctk.CTk):
                         self.stat_proxies.lbl_val.configure(text="⚠️ Медленный пул", text_color="#fbbf24")
 
                 elif kind == "check_completed":
-                    self.profile_manager.reset_session_statuses()
                     results: List[CheckResult] = msg[1]
                     self.is_running = False
                     self.btn_start.configure(state="normal", text="▶  Запустить проверку")
@@ -2823,17 +2823,17 @@ class EtixGuiApp(ctk.CTk):
                     self._update_blocked_badge()
                     self._refresh_proxy_tab_data()
 
-                    # Check for blocked profiles recorded in this session
+                    # Check for blocked profiles recorded in this latest check
                     blocked = self.profile_manager.get_session_blocked_profiles()
                     if blocked:
                         self._log("⚠️ =========================================")
-                        self._log(f"⚠️ ВНИМАНИЕ: Во время проверки были заблокированы {len(blocked)} профилей:")
+                        self._log(f"⚠️ ВНИМАНИЕ: Во время последней проверки были заблокированы {len(blocked)} профилей:")
                         details_lines = []
                         for bp in blocked:
                             info = f"• {bp['name']} (ID: {bp['user_id']}) | Прокси: {bp.get('proxy', 'N/A')}"
                             self._log(f"   🚫 {info} — {bp.get('reason', 'Заблокирован')}")
                             details_lines.append(info)
-                        self._log("📝 Полный список сохранен в 'data/blocked_profiles.txt'.")
+                        self._log("📝 Список заблокированных профилей последней проверки сохранен в 'data/blocked_profiles.txt'.")
                         self._log("⚠️ =========================================")
 
                         self._show_blocked_profiles_modal()
@@ -2841,10 +2841,10 @@ class EtixGuiApp(ctk.CTk):
                         messagebox.showinfo("Готово", "Проверка завершена! Результаты сохранены в report.csv.")
 
                 elif kind == "check_failed":
-                    self.profile_manager.reset_session_statuses()
                     self.is_running = False
                     self.btn_start.configure(state="normal", text="▶  Запустить проверку")
                     self.stat_status.lbl_val.configure(text="❌ Ошибка", text_color="#ef4444")
+                    self._update_blocked_badge()
                     err = msg[1]
                     self._log(f"❌ Ошибка: {err}")
                     messagebox.showerror("Ошибка проверки", err)

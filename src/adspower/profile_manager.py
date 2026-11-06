@@ -97,13 +97,22 @@ class AdsPowerProfileManager:
                 "timestamp": now_str,
             })
 
-        # Append to persistent blocked_profiles.txt
+        # Append to persistent blocked_profiles.txt (for latest check cycle)
         try:
             self.blocked_profiles_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.blocked_profiles_file, "a", encoding="utf-8") as f:
                 f.write(f"[{now_str}] Profile: {profile.name} (ID: {profile.user_id}) | Proxy: {proxy_info} | Reason: {reason}\n")
         except Exception as exc:
             LOGGER.warning(f"Failed to write to {self.blocked_profiles_file}: {exc}")
+
+        # Append to historical diagnostic log in logs/
+        try:
+            history_file = Path("logs/blocked_profiles_history.log")
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(history_file, "a", encoding="utf-8") as f:
+                f.write(f"[{now_str}] Profile: {profile.name} (ID: {profile.user_id}) | Proxy: {proxy_info} | Reason: {reason}\n")
+        except Exception:
+            pass
 
         LOGGER.warning(
             f"🚫 Recorded BLOCKED profile: '{profile.name}' (ID: {profile.user_id}) with proxy {proxy_info}. Reason: {reason}"
@@ -113,9 +122,18 @@ class AdsPowerProfileManager:
         """Return all profiles that were blocked during the current session."""
         return list(self._session_blocked_profiles)
 
+    def clear_blocked_profiles_file(self) -> None:
+        """Reset blocked_profiles.txt so it reflects strictly the latest check cycle."""
+        try:
+            self.blocked_profiles_file.parent.mkdir(parents=True, exist_ok=True)
+            self.blocked_profiles_file.write_text("", encoding="utf-8")
+        except Exception as exc:
+            LOGGER.warning(f"Failed to reset {self.blocked_profiles_file}: {exc}")
+
     def clear_session_blocked_profiles(self) -> None:
         """Reset session blocked profiles at the start of a check."""
         self._session_blocked_profiles.clear()
+        self.clear_blocked_profiles_file()
 
     def is_proxy_bad_in_session(self, proxy_str: str) -> bool:
         """Check if proxy is marked bad in current run cycle."""

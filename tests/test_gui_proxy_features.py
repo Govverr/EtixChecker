@@ -161,6 +161,88 @@ class TestGuiProxyFeatures(unittest.TestCase):
         self.assertEqual(card_proxies.lbl_val._good.configure.call_args_list[-1][1]["text"], "Good: 263")
         self.assertEqual(card_proxies.lbl_val._slow.configure.call_args_list[-1][1]["text"], "Slow: 0")
 
+    @patch("gui_app.ctk.CTkProgressBar")
+    @patch("gui_app.ctk.CTkFont")
+    @patch("gui_app.ctk.CTkLabel")
+    @patch("gui_app.ctk.CTkFrame")
+    def test_card_dimensions_prevent_clipping(
+        self, mock_frame_cls, mock_label_cls, mock_font_cls, mock_progress_cls
+    ):
+        """Verify top cards have height=88 and width=165 to prevent bottom info clipping."""
+        mock_label_cls.side_effect = lambda *args, **kwargs: MagicMock()
+        mock_progress_cls.side_effect = lambda *args, **kwargs: MagicMock()
+
+        created_frames = []
+        def capture_frame(*args, **kwargs):
+            m = MagicMock()
+            m.kwargs = kwargs
+            created_frames.append((m, kwargs))
+            return m
+
+        mock_frame_cls.side_effect = capture_frame
+        app = EtixGuiApp.__new__(EtixGuiApp)
+        parent_mock = MagicMock()
+
+        app._create_events_card(parent_mock)
+        events_card_kw = created_frames[0][1]
+        self.assertEqual(events_card_kw.get("height"), 88)
+        self.assertEqual(events_card_kw.get("width"), 165)
+
+        created_frames.clear()
+        app._create_tickets_card(parent_mock)
+        tickets_card_kw = created_frames[0][1]
+        self.assertEqual(tickets_card_kw.get("height"), 88)
+        self.assertEqual(tickets_card_kw.get("width"), 165)
+
+        created_frames.clear()
+        app._create_workers_card(parent_mock)
+        workers_card_kw = created_frames[0][1]
+        self.assertEqual(workers_card_kw.get("height"), 88)
+        self.assertEqual(workers_card_kw.get("width"), 165)
+
+        created_frames.clear()
+        app._create_status_card(parent_mock)
+        status_card_kw = created_frames[0][1]
+        self.assertEqual(status_card_kw.get("height"), 88)
+        self.assertEqual(status_card_kw.get("width"), 165)
+
+        created_frames.clear()
+        app._create_proxies_card(parent_mock)
+        proxies_card_kw = created_frames[0][1]
+        self.assertEqual(proxies_card_kw.get("height"), 88)
+        self.assertEqual(proxies_card_kw.get("width"), 165)
+
+    def test_profile_manager_blocked_profiles_per_check_lifecycle(self):
+        """Verify blocked_profiles.txt is reset per check, keeping only the latest check's blocked profiles."""
+        from src.adspower.profile_manager import AdsPowerProfileManager
+        from src.domain.models import AdsPowerProfile
+
+        blocked_file = self.temp_path / "blocked_profiles.txt"
+        pm = AdsPowerProfileManager.__new__(AdsPowerProfileManager)
+        pm.blocked_profiles_file = blocked_file
+        pm._session_blocked_profiles = []
+        pm._session_bad_proxies = set()
+        pm.profiles = []
+
+        # Populate with a previous run's blocked profile
+        blocked_file.write_text("[2026-11-06 10:00:00] Profile: Old (ID: old1) | Proxy: N/A | Reason: Blocked\n", encoding="utf-8")
+        pm._session_blocked_profiles.append({"user_id": "old1", "name": "Old"})
+
+        # Start of new check: clear session statuses
+        pm.clear_session_blocked_profiles()
+        self.assertEqual(len(pm.get_session_blocked_profiles()), 0)
+        self.assertEqual(blocked_file.read_text(encoding="utf-8"), "")
+
+        # A new profile gets blocked during this latest check
+        p_new = AdsPowerProfile(user_id="new1", name="New Profile", serial_number="1", group_id="g1", group_name="Test")
+        pm.record_blocked_profile(p_new, reason="DataDome: Hard Block")
+
+        self.assertEqual(len(pm.get_session_blocked_profiles()), 1)
+        content = blocked_file.read_text(encoding="utf-8")
+        self.assertIn("New Profile", content)
+        self.assertIn("ID: new1", content)
+        self.assertNotIn("Old", content)
+
 
 if __name__ == "__main__":
     unittest.main()
